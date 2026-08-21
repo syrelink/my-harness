@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+httpx
+pydantic
+PyYAML>=6.0
+langchain
+langchain-openai
+langfuse
+psycopg[binary,pool]>=3.2
+pytest
+pytest-asyncio
+minio>=7.2

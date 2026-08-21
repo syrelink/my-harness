@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: gamescope-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gamescope
+      POSTGRES_PASSWORD: gamescope
+      POSTGRES_DB: gamescope
+    ports:
+      - "5433:5432"
+    volumes:
+      - gamescope_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gamescope -d gamescope"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  gamescope_postgres_data:
