@@ -6,8 +6,7 @@
 
 持久化遵循 DSH / Codex 的「状态与日志分离」原则：
 - 会话级字段（active_messages / context_summary / turn_count 等）持久化；
-- 本轮临时字段（当前图片、token 用量、工具轨迹、本轮指标）只作为局部变量，
-  每轮重新声明、天然归零，绝不进入持久状态。
+- 当前图片和运行事件只在本轮存在，不进入持久状态。
 
 可观测性由 Langfuse 提供（@observe 生成 Trace/Span，CallbackHandler 采集 LLM 调用）。
 """
@@ -29,9 +28,7 @@ from app.game_agent.events import EventEmitter, EventSink
 from app.game_agent.memory import (
     ContextBudget,
     ContextManager,
-    context_summary_from_state,
 )
-from app.game_agent.models import ToolTrace, TurnTokenUsage
 from app.game_agent.observability import langfuse_handler, observe
 from app.game_agent.prompts import build_agent_system_prompt
 from app.game_agent.skills import SkillRegistry
@@ -53,8 +50,8 @@ def create_model(prefix: str = "GAME_ASSISTANT") -> ChatOpenAI:
     )
 
 
-def truncate_tool_payload(content: str, token_budget: int) -> tuple[str, bool]:
-    """把工具结果裁到预算内，返回 ``(裁剪后内容, 是否发生裁剪)``。
+def truncate_tool_payload(content: str, token_budget: int) -> str:
+    """把工具结果裁到预算内，避免 ToolMessage 挤占过多上下文。
 
     工具正文最终会成为 ToolMessage，再进入下一次模型输入。如果网页结果过长，会同时
     增加 Token、延迟和费用。这里用“约 4 字符 = 1 Token”换算粗略字符上限；这是保护
@@ -65,7 +62,7 @@ def truncate_tool_payload(content: str, token_budget: int) -> tuple[str, bool]:
     """
     rough_limit = max(32, token_budget * 4)
     if len(content) <= rough_limit:
-        return content, False
+        return content
     try:
         payload = json.loads(content)
         if payload.get("error"):
@@ -76,20 +73,20 @@ def truncate_tool_payload(content: str, token_budget: int) -> tuple[str, bool]:
                     "tool": payload.get("tool", "unknown"),
                 }, ensure_ascii=False)
                 if len(compact) <= rough_limit:
-                    return compact, True
-            return json.dumps({"error": "tool_error"}, ensure_ascii=False), True
+                    return compact
+            return json.dumps({"error": "tool_error"}, ensure_ascii=False)
 
         results = payload.get("results", [])
         if isinstance(results, list):
             payload["results"] = results[:3]
             compact = json.dumps(payload, ensure_ascii=False)
             if len(compact) <= rough_limit:
-                return compact, True
+                return compact
     except (json.JSONDecodeError, AttributeError, TypeError):
         pass
 
     suffix = "\n[truncated]"
-    return content[: max(0, rough_limit - len(suffix))] + suffix, True
+    return content[: max(0, rough_limit - len(suffix))] + suffix
 
 
 class GameAgent:
@@ -119,7 +116,6 @@ class GameAgent:
         # bind_tools 只把工具 Schema 告诉模型；此时不会执行任何工具。
         self.model_with_tools = model.bind_tools(tools)
         self.context_manager = context_manager
-        self.budget = context_manager.budget
         self.skill_registry = skill_registry
         self.session_store = session_store
         self.attachment_loader = attachment_loader
@@ -137,35 +133,8 @@ class GameAgent:
         return await self.session_store.load_state(session_id)
 
     async def save_state(self, session_id: str, state: dict) -> None:
-        """把一轮完成后的跨轮状态写回 PostgreSQL。
-
-        ToolTrace、本轮 Token Usage 等只存在于 ``run_turn`` 局部变量里，不会传给这里，
-        因而不会污染下一轮 Agent 上下文。
-        """
+        """把一轮完成后的跨轮状态写回 PostgreSQL。"""
         await self.session_store.save_state(session_id, state)
-
-    async def force_compact(self, session_id: str) -> dict:
-        """由管理接口强制压缩一个已有会话，并持久化压缩结果。
-
-        它不调用主模型回答用户，只运行 ContextManager 的压缩流程。``compact`` 返回的是
-        State 增量，因此这里把新的消息列表和四个跨轮字段显式合回原 state。
-        """
-        state = await self.load_state(session_id)
-        if not state.get("active_messages"):
-            return {"compacted": False, "reason": "session not found"}
-        update = await self.context_manager.compact(
-            state,
-            self.agent_system_prompt,
-            force=True,
-        )
-        messages = update.pop("active_messages", None)
-        if messages is not None:
-            state["active_messages"] = messages
-        for key in ("context_summary", "compaction_count", "summary_version"):
-            if key in update:
-                state[key] = update[key]
-        await self.save_state(session_id, state)
-        return update
 
     # ---------- 一轮主循环 ----------
     # 装饰器在不修改业务流程的前提下，把整个 run_turn 包装为名为 agent_turn 的
@@ -176,7 +145,6 @@ class GameAgent:
         session_id: str,
         user_message,
         current_attachments: list,
-        force_compaction: bool = False,
         on_event: EventSink | None = None,
     ) -> dict:
         """执行从一个用户输入到最终回答的完整 Agent Turn。
@@ -185,11 +153,9 @@ class GameAgent:
         - ``session_id``：数据库会话分区键；
         - ``user_message``：本轮只含文字/附件引用的 HumanMessage；
         - ``current_attachments``：只在本轮临时 Hydrate 的图片引用；
-        - ``force_compaction``：是否在首次模型调用前强制压缩；
         - ``on_event``：可选事件消费者，SSE、日志和测试可复用同一协议。
 
-        while 循环的退出条件是模型不再返回 tool_calls。返回值包含最终答案以及本轮临时
-        指标；真正需要跨轮恢复的 state 会在返回前单独写入 PostgreSQL。
+        while 循环的退出条件是模型不再返回 tool_calls；跨轮 state 在返回前写入 PostgreSQL。
         """
         events = EventEmitter(session_id, on_event)
         await events.emit("turn.started")
@@ -200,12 +166,6 @@ class GameAgent:
         state["turn_count"] = int(state.get("turn_count", 0)) + 1
         started = time.perf_counter()
 
-        # —— 临时层：本轮局部变量，每轮重新声明、天然归零，不进入持久状态 ——
-        turn_token_usage = TurnTokenUsage()
-        tool_trace: list[dict] = []
-        tool_rounds = 0
-        compacted = False
-        context_metrics: dict = {}
         last_response = AIMessage(content="")
 
         while True:
@@ -214,17 +174,14 @@ class GameAgent:
             update = await self.context_manager.compact(
                 state,
                 self.agent_system_prompt,
-                force=bool(force_compaction) and tool_rounds == 0,
             )
             messages = update.pop("active_messages", None)
             if messages is not None:
                 state["active_messages"] = messages
-            # 只把跨轮字段写回 state；compacted / context_metrics 等是本轮观测结果。
-            # 等临时字段留在本轮局部变量，不进入持久状态。
+            # 只把需要跨轮恢复的字段写回 state。
             for key in ("context_summary", "compaction_count", "summary_version"):
                 if key in update:
                     state[key] = update[key]
-            compacted = compacted or bool(update.get("compacted", False))
             measured = update.get("context_metrics", {})
             attempted = bool(update.get("compaction_attempted", False))
             await events.emit(
@@ -251,33 +208,20 @@ class GameAgent:
             await events.emit("model.completed", **usage)
             last_response = response
             state["active_messages"] = list(state["active_messages"]) + [response]
-            turn_token_usage = self._accumulate(turn_token_usage, usage)
-            context_metrics = measured
 
             if not response.tool_calls:
                 # 普通文本回答表示任务结束；有 tool_calls 则继续执行工具并进入下一圈。
                 break
 
             # ToolExecution：手动执行本批工具。
-            tool_messages, traces = await self._execute_tools(response, events)
+            tool_messages = await self._execute_tools(response, events)
             state["active_messages"] = list(state["active_messages"]) + tool_messages
-            tool_trace.extend([t.model_dump() for t in traces])
-            tool_rounds += 1
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        # state 中此刻只含跨轮字段；本轮 token / trace / 指标等临时数据不进持久状态。
         await self.save_state(session_id, state)
         await events.emit("turn.completed", elapsed_ms=elapsed_ms)
 
-        return {
-            "answer": last_response.text,
-            "tool_trace": tool_trace,
-            "context_metrics": context_metrics,
-            "token_usage": turn_token_usage,
-            "context_summary": context_summary_from_state(state),
-            "compacted": compacted,
-            "elapsed_ms": elapsed_ms,
-        }
+        return {"answer": last_response.text}
 
     # ---------- 模型调用 ----------
     # 这是 agent_turn 的子 Observation；其中的 LangChain CallbackHandler 还会再创建一个
@@ -323,14 +267,13 @@ class GameAgent:
     # 单次工具调用抽成一个带 @observe(as_type="tool") 的函数。
     @observe(name="tool_execution")
     async def _execute_tools(self, response: AIMessage, events: EventEmitter):
-        """按模型返回的 tool_calls 顺序执行工具，并生成 ToolMessage 与 ToolTrace。
+        """按模型返回的 tool_calls 顺序执行工具，并生成 ToolMessage。
 
-        ToolMessage 会放回消息历史供下一次模型读取；ToolTrace 只供本轮接口展示和调试。
-        单个工具具有超时和异常降级，失败会转成结构化 ToolMessage，而不是直接打断整轮。
+        ToolMessage 会放回消息历史供下一次模型读取。单个工具具有超时和异常降级，
+        失败会转成结构化 ToolMessage，而不是直接打断整轮。
 
         """
         tool_messages: list[ToolMessage] = []
-        traces: list[ToolTrace] = []
         for call in response.tool_calls:
             name = call.get("name", "unknown")
             args = call.get("args", {})
@@ -356,7 +299,7 @@ class GameAgent:
                     content = json.dumps({"error": str(exc), "error_type": type(exc).__name__, "tool": name}, ensure_ascii=False)
                     status = "error"
                     error_type = type(exc).__name__
-            content, truncated = truncate_tool_payload(content, self.tool_result_tokens)
+            content = truncate_tool_payload(content, self.tool_result_tokens)
             latency_ms = int((time.perf_counter() - started) * 1000)
             await events.emit(
                 "tool.completed",
@@ -365,35 +308,12 @@ class GameAgent:
                 latency_ms=latency_ms,
                 error_type=error_type,
             )
-            traces.append(ToolTrace(
-                name=name, arguments=args, status=status, preview=content[:1200],
-                latency_ms=latency_ms, error_type=error_type, truncated=truncated,
-            ))
             tool_messages.append(ToolMessage(
                 content=content, tool_call_id=call.get("id", ""), name=name,
                 status="error" if status == "error" else "success",
                 id=str(uuid4()),
             ))
-        return tool_messages, traces
-
-    # ---------- Token 与指标 ----------
-    @staticmethod
-    def _accumulate(current: TurnTokenUsage, usage: dict) -> TurnTokenUsage:
-        """把一次模型 Usage 累加到当前 Turn 的 Token 汇总中。
-
-        一个 Turn 可能经历多次“模型 → 工具 → 模型”，所以不能只看最后一次调用。
-        ``model_copy`` 创建新 Pydantic 对象，避免原地修改旧统计。
-        """
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        total = int(usage.get("total_tokens") or (input_tokens + output_tokens))
-        return current.model_copy(update={
-            "input_tokens": current.input_tokens + input_tokens,
-            "output_tokens": current.output_tokens + output_tokens,
-            "total_tokens": current.total_tokens + total,
-            "model_calls": current.model_calls + 1,
-            "estimated_calls": current.estimated_calls + (0 if usage.get("input_tokens") else 1),
-        })
+        return tool_messages
 
 def build_game_assistant(session_store, attachment_loader: AttachmentLoader | None = None) -> GameAgent:
     """在 FastAPI 启动时组装并返回一个可复用的 ``GameAgent`` 实例。

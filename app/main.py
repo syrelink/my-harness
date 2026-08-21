@@ -22,10 +22,7 @@ from app.game_agent.models import (
     AttachmentRef,
     ChatRequest,
     ChatResponse,
-    ContextMetrics,
     SessionRenameRequest,
-    ToolTrace,
-    TurnTokenUsage,
 )
 from app.session_store import SessionStore
 
@@ -94,21 +91,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
         req.session_id,
         _user_message(req, attachment_refs),
         [item.model_dump() for item in attachment_refs],
-        force_compaction=req.force_compaction,
     )
     await app.state.session_store.record_assistant_message(req.session_id, result["answer"])
-    return _chat_response(result)
-
-
-def _chat_response(result: dict) -> ChatResponse:
-    return ChatResponse(
-        answer=result["answer"],
-        tool_trace=[ToolTrace.model_validate(item) for item in result.get("tool_trace", [])],
-        context_metrics=ContextMetrics.model_validate(result.get("context_metrics", {})),
-        token_usage=TurnTokenUsage.model_validate(result["token_usage"].model_dump()),
-        context_summary=result["context_summary"],
-        compacted=result.get("compacted", False),
-    )
+    return ChatResponse(answer=result["answer"])
 
 
 def _sse(event: str, data: dict) -> str:
@@ -159,7 +144,6 @@ async def stream_chat(req: ChatRequest):
                     req.session_id,
                     _user_message(req, attachment_refs),
                     [item.model_dump() for item in attachment_refs],
-                    force_compaction=req.force_compaction,
                     on_event=on_event,
                 )
                 await queue.put({"kind": "__done__", "result": result})
@@ -173,15 +157,7 @@ async def stream_chat(req: ChatRequest):
             if kind == "__done__":
                 result = event["result"]
                 await app.state.session_store.record_assistant_message(req.session_id, result["answer"])
-                yield _sse("final", {
-                    "answer": result["answer"],
-                    "tool_trace": result["tool_trace"],
-                    "context_metrics": result["context_metrics"],
-                    "token_usage": result["token_usage"].model_dump(),
-                    "context_summary": result["context_summary"].model_dump(),
-                    "compacted": result["compacted"],
-                    "elapsed_ms": result["elapsed_ms"],
-                })
+                yield _sse("final", {"answer": result["answer"]})
                 break
             if kind == "__error__":
                 exc = event["error"]

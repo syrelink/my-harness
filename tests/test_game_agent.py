@@ -17,7 +17,7 @@ from app.game_agent.memory import (
     split_by_recent_budget,
     split_into_complete_turns,
 )
-from app.game_agent.models import ContextSummary
+from app.game_agent.models import ChatRequest, ContextSummary
 from app.game_agent.search import plain_text
 from app.game_agent.skills import SkillRegistry
 from app.game_agent.tools import read_skill_file
@@ -89,6 +89,16 @@ def test_context_summary_from_state_empty():
     assert context_summary_from_state({}) is not None
 
 
+def test_chat_request_requires_content():
+    with pytest.raises(ValueError, match="文字和附件不能同时为空"):
+        ChatRequest(session_id="session-1")
+
+
+def test_chat_request_accepts_text_only():
+    request = ChatRequest(session_id="session-1", question="你好")
+    assert request.attachments == []
+
+
 def test_model_context_estimate_includes_system_summary_and_messages():
     manager = ContextManager(None, ContextBudget(
         context_window_tokens=1_000,
@@ -98,7 +108,7 @@ def test_model_context_estimate_includes_system_summary_and_messages():
         protocol_overhead_tokens=10,
     ))
     state = {
-        "context_summary": {"critical_context": ["用户使用 Python"]},
+        "context_summary": {"key_facts": ["用户使用 Python"]},
         "active_messages": [HumanMessage(content="继续实现")],
     }
     messages_only = manager.build_model_context(state, "system")
@@ -132,7 +142,7 @@ async def test_agent_events_have_stable_turn_and_sequence():
 
 
 @pytest.mark.asyncio
-async def test_force_compaction_keeps_recent_turn_and_updates_summary():
+async def test_compaction_keeps_recent_turn_and_updates_summary():
     manager = ContextManager(None, ContextBudget(
         context_window_tokens=1_000,
         trigger_ratio=0.8,
@@ -142,13 +152,13 @@ async def test_force_compaction_keeps_recent_turn_and_updates_summary():
 
     async def fake_summarize(_self, old_summary, expired_messages):
         assert isinstance(old_summary, ContextSummary)
-        assert old_summary.critical_context == ["更早一版摘要"]
+        assert old_summary.key_facts == ["更早一版摘要"]
         assert [message.id for message in expired_messages] == ["h1", "a1"]
-        return ContextSummary(critical_context=["old question 已处理"])
+        return ContextSummary(key_facts=["old question 已处理"])
 
     manager._summarize = MethodType(fake_summarize, manager)
     state = {
-        "context_summary": {"critical_context": ["更早一版摘要"]},
+        "context_summary": {"key_facts": ["更早一版摘要"]},
         "active_messages": [
             HumanMessage(content="old question " * 10, id="h1"),
             AIMessage(content="old answer " * 10, id="a1"),
@@ -156,9 +166,9 @@ async def test_force_compaction_keeps_recent_turn_and_updates_summary():
             AIMessage(content="recent answer " * 10, id="a2"),
         ]
     }
-    result = await manager.compact(state, "system", force=True)
+    result = await manager.compact(state, "system")
     assert [message.id for message in result["active_messages"]] == ["h2", "a2"]
-    assert result["context_summary"]["critical_context"] == ["old question 已处理"]
+    assert result["context_summary"]["key_facts"] == ["old question 已处理"]
     assert result["summary_version"] == 1
 
 
@@ -183,7 +193,7 @@ async def test_summary_failure_is_raised_without_mutating_state():
     ]
     state = {"active_messages": original_messages}
     with pytest.raises(RuntimeError, match="summary model unavailable"):
-        await manager.compact(state, "system", force=True)
+        await manager.compact(state, "system")
     assert state == {"active_messages": original_messages}
 
 

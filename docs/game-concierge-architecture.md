@@ -26,10 +26,10 @@ while True:
 
 ## 核心文件
 
-- `agent.py`：Agent Loop、模型调用、工具执行、Token 累计。
+- `agent.py`：Agent Loop、模型调用和工具执行。
 - `events.py`：统一的 AgentEvent 与本轮有序事件发布器。
 - `memory.py`：上下文边界、滚动摘要和模型上下文组装。
-- `models.py`：ContextSummary、Context Metrics、Tool Trace、请求/响应模型。
+- `models.py`：ContextSummary、附件引用和 HTTP 请求/响应模型。
 - `tools.py`：`read_skill_file` / `web_search` 两个工具。
 - `skills/`：Agent Skills 元数据、工作流、references 与安全加载器。
 - `search.py`：最小化 DuckDuckGo 网页搜索。
@@ -51,8 +51,7 @@ compaction_count    # 累计压缩次数
 summary_version     # 摘要版本号
 ```
 
-本轮临时字段（当前图片、本轮 Token、工具轨迹、本轮指标）只作为局部变量，每轮重新声明、
-天然归零，绝不进入持久状态。
+当前图片和运行事件只存在于本轮，不进入持久状态；模型 Usage 和调用链由 Langfuse 记录。
 
 `session_store.py` 在 Postgres 中维护：
 
@@ -125,7 +124,7 @@ agent_turn → model_call → tool_execution
 ```text
 token   # 打字机流式输出
 agent_event # Turn、上下文、模型与工具生命周期事件
-final   # 最终结果（tool_trace / context_metrics / token_usage / context_summary）
+final   # 最终回答
 error   # 错误
 ```
 

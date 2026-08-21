@@ -15,7 +15,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
-from app.game_agent.models import ContextMetrics, ContextSummary
+from app.game_agent.models import ContextSummary
 from app.game_agent.prompts import COMPACTION_PROMPT
 
 
@@ -143,30 +143,21 @@ class ContextManager:
         self,
         state: dict,
         system_prompt: str,
-        force: bool = False,
     ) -> dict:
         """达到阈值后滚动替换摘要；摘要失败直接向上抛错。"""
-        messages = state.get("active_messages", [])
         tokens_before = self.estimate_model_context(state, system_prompt)
-        base_metrics = ContextMetrics(
-            context_window_tokens=self.budget.context_window_tokens,
-            trigger_ratio=self.budget.trigger_ratio,
-            trigger_tokens=self.budget.trigger_tokens,
-            retain_ratio=self.budget.retain_ratio,
-            recent_budget_tokens=self.budget.recent_tokens,
-            summary_budget_tokens=self.budget.summary_tokens,
-            model_input_tokens=tokens_before,
-            messages_before=len(messages),
-            messages_after=len(messages),
-            summary_version=int(state.get("summary_version", 0)),
-        )
-        if not force and tokens_before < self.budget.trigger_tokens:
+        metrics = {
+            "model_input_tokens": tokens_before,
+            "trigger_tokens": self.budget.trigger_tokens,
+        }
+        if tokens_before < self.budget.trigger_tokens:
             return {
-                "context_metrics": base_metrics.model_dump(),
+                "context_metrics": metrics,
                 "compacted": False,
                 "compaction_attempted": False,
             }
 
+        messages = state.get("active_messages", [])
         expired, recent = split_by_recent_budget(messages, self.budget.recent_tokens)
         if not expired:
             raise RuntimeError("上下文已超过压缩阈值，但没有可安全压缩的旧完整 Turn")
@@ -183,23 +174,16 @@ class ContextManager:
             "summary_version": next_version,
         }
         tokens_after = self.estimate_model_context(candidate, system_prompt)
-        metrics = base_metrics.model_copy(update={
-            "summary_tokens": estimate_tokens([
-                SystemMessage(content=json.dumps(summary.model_dump(), ensure_ascii=False))
-            ]),
+        metrics.update({
             "model_input_tokens": tokens_after,
-            "messages_after": len(recent),
-            "compacted_messages": len(expired),
             "tokens_before_compaction": tokens_before,
             "tokens_after_compaction": tokens_after,
-            "reduced_tokens": max(0, tokens_before - tokens_after),
             "converged": tokens_after < tokens_before,
-            "summary_version": next_version,
         })
         return {
             "active_messages": recent,
             "context_summary": summary.model_dump(),
-            "context_metrics": metrics.model_dump(),
+            "context_metrics": metrics,
             "compacted": True,
             "compaction_attempted": True,
             "compaction_count": int(state.get("compaction_count", 0)) + 1,
