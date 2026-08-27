@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from types import MethodType
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain.tools import tool
 
 from app.attachment_store import attachment_object_key, attachment_prefix
 from app.game_agent.agent import GameAgent
-from app.game_agent.events import EventEmitter
 from app.game_agent.memory import (
     ContextBudget,
     ContextManager,
@@ -20,7 +22,8 @@ from app.game_agent.memory import (
 from app.game_agent.models import ChatRequest, ContextSummary
 from app.game_agent.search import plain_text
 from app.game_agent.skills import SkillRegistry
-from app.game_agent.tools import read_skill_file
+from app.game_agent.stream import TextDelta, TurnCompleted
+from app.game_agent.tools import read_skill, search_backend, web_search
 
 
 def test_skill_registry_catalog_and_load():
@@ -36,14 +39,50 @@ def test_skill_registry_catalog_and_load():
 
 
 def test_skill_tool_returns_content():
-    result = read_skill_file.invoke({"name": "game-news", "path": "SKILL.md"})
+    result = read_skill.invoke({"name": "game-news", "paths": ["SKILL.md"]})
     assert '"status": "loaded"' in result
     assert "game-news" in result
 
 
-def test_read_skill_file_rejects_unknown_reference():
-    result = read_skill_file.invoke({"name": "game-news", "path": "references/nope.md"})
-    assert '"error"' in result
+def test_read_skill_batches_selected_references():
+    result = json.loads(read_skill.invoke({
+        "name": "game-news",
+        "paths": [
+            "references/freshness-policy.md",
+            "references/source-policy.md",
+        ],
+    }))
+    assert [item["path"] for item in result["documents"]] == [
+        "references/freshness-policy.md",
+        "references/source-policy.md",
+    ]
+
+
+def test_read_skill_reports_unknown_reference():
+    result = json.loads(read_skill.invoke({
+        "name": "game-news",
+        "paths": ["references/nope.md"],
+    }))
+    assert result["status"] == "error"
+    assert result["errors"][0]["path"] == "references/nope.md"
+
+
+@pytest.mark.asyncio
+async def test_web_search_runs_batch_concurrently(monkeypatch):
+    started = []
+    both_started = asyncio.Event()
+
+    async def fake_search(query, limit=5):
+        started.append(query)
+        if len(started) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=0.2)
+        return []
+
+    monkeypatch.setattr(search_backend, "search", fake_search)
+    result = json.loads(await web_search.ainvoke({"queries": ["query-a", "query-b"]}))
+    assert started == ["query-a", "query-b"]
+    assert [item["query"] for item in result["searches"]] == ["query-a", "query-b"]
 
 
 def test_plain_text_strips_html():
@@ -128,20 +167,6 @@ def test_recent_turn_must_fit_within_recent_budget():
 
 
 @pytest.mark.asyncio
-async def test_agent_events_have_stable_turn_and_sequence():
-    captured = []
-
-    async def sink(event):
-        captured.append(event)
-
-    emitter = EventEmitter("session-1", sink)
-    await emitter.emit("turn.started")
-    await emitter.emit("model.started")
-    assert [event.sequence for event in captured] == [1, 2]
-    assert captured[0].turn_id == captured[1].turn_id
-
-
-@pytest.mark.asyncio
 async def test_compaction_keeps_recent_turn_and_updates_summary():
     manager = ContextManager(None, ContextBudget(
         context_window_tokens=1_000,
@@ -198,7 +223,7 @@ async def test_summary_failure_is_raised_without_mutating_state():
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_emits_events_and_persists_only_active_context():
+async def test_agent_loop_streams_tokens_and_persists_only_active_context():
     class FakeModel:
         def bind_tools(self, _tools):
             return self
@@ -224,27 +249,53 @@ async def test_agent_loop_emits_events_and_persists_only_active_context():
         retain_ratio=0.1,
     ))
     agent = GameAgent(FakeModel(), [], manager, SkillRegistry.default(), store)
-    agent._call_model = MethodType(GameAgent._call_model.__wrapped__, agent)
-    captured = []
-
-    async def sink(event):
-        captured.append(event.event_type)
+    agent._stream_model = MethodType(GameAgent._stream_model.__wrapped__, agent)
 
     # 绕过 Langfuse 装饰器，只验证 Harness 业务循环，测试不会访问外部观测服务。
-    result = await agent.run_turn.__wrapped__(
-        agent,
-        "session-1",
-        HumanMessage(content="hello", id="h1"),
-        [],
-        on_event=sink,
+    stream = agent.stream_turn.__wrapped__(
+        agent, "session-1", HumanMessage(content="hello", id="h1"), []
     )
-    assert result["answer"] == "ok"
+    events = [event async for event in stream]
+    assert events == [TextDelta("ok"), TurnCompleted("ok")]
     assert "active_messages" in store.saved and "messages" not in store.saved
-    assert captured == [
-        "turn.started",
-        "context.measured",
-        "model.started",
-        "model.token",
-        "model.completed",
-        "turn.completed",
-    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_executes_parallel_tools_and_preserves_result_order():
+    started = []
+    both_started = asyncio.Event()
+
+    @tool
+    async def parallel_probe(value: int) -> str:
+        """用于验证并行调度的只读测试工具。"""
+        started.append(value)
+        if len(started) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=0.2)
+        return str(value)
+
+    parallel_probe.metadata = {"execution_mode": "parallel"}
+
+    class FakeModel:
+        def bind_tools(self, _tools):
+            return self
+
+    class FakeStore:
+        pass
+
+    agent = GameAgent(
+        FakeModel(),
+        [parallel_probe],
+        ContextManager(None, ContextBudget(context_window_tokens=10_000)),
+        SkillRegistry.default(),
+        FakeStore(),
+    )
+    response = AIMessage(content="", tool_calls=[
+        {"name": "parallel_probe", "args": {"value": 1}, "id": "call-1"},
+        {"name": "parallel_probe", "args": {"value": 2}, "id": "call-2"},
+    ])
+
+    messages = await agent._execute_tools.__wrapped__(agent, response)
+    assert started == [1, 2]
+    assert [message.tool_call_id for message in messages] == ["call-1", "call-2"]
+    assert [message.content for message in messages] == ["1", "2"]

@@ -13,7 +13,7 @@ GameRover 是一个面向中文玩家的游戏资讯与玩法助手。它不使�
       └─ 有 tool_calls → 手动执行工具 → 回到压缩测压 → Agent
 ```
 
-整个循环在 `agent.py` 的 `GameAgent.run_turn()` 里，是一个普通 `while True`：
+整个循环在 `agent.py` 的 `GameAgent.stream_turn()` 里，是一个普通 `while True`：
 
 ```python
 while True:
@@ -27,10 +27,10 @@ while True:
 ## 核心文件
 
 - `agent.py`：Agent Loop、模型调用和工具执行。
-- `events.py`：统一的 AgentEvent 与本轮有序事件发布器。
+- `stream.py`：`TextDelta` / `TurnCompleted` 两种公开流事件。
 - `memory.py`：上下文边界、滚动摘要和模型上下文组装。
 - `models.py`：ContextSummary、附件引用和 HTTP 请求/响应模型。
-- `tools.py`：`read_skill_file` / `web_search` 两个工具。
+- `tools.py`：批量 `read_skill` / `web_search` 两个工具。
 - `skills/`：Agent Skills 元数据、工作流、references 与安全加载器。
 - `search.py`：最小化 DuckDuckGo 网页搜索。
 - `multimodal.py`：图片引用协议与模型调用前的临时 Hydration。
@@ -51,7 +51,7 @@ compaction_count    # 累计压缩次数
 summary_version     # 摘要版本号
 ```
 
-当前图片和运行事件只存在于本轮，不进入持久状态；模型 Usage 和调用链由 Langfuse 记录。
+当前图片只存在于本轮，不进入持久状态；模型 Usage 和调用链由 Langfuse 记录。
 
 `session_store.py` 在 Postgres 中维护：
 
@@ -92,12 +92,25 @@ Postgres Transcript 和 Agent State 只保存 `AttachmentRef`，不再维护附�
 
 启动时 `SkillRegistry.refresh()` 扫描 `skills/*/SKILL.md`，只提取 `name + description`
 注入 System Prompt 作为目录。模型判断任务匹配某个 Skill 时调用
-`read_skill_file(name, "SKILL.md")` 加载正文；只有正文明确要求且任务需要时，才用同一工具
-加载 references。
+`read_skill(name, paths=["SKILL.md"])` 加载正文；只有正文明确要求且任务需要时，才把选中的
+references 合并到下一次 `paths` 批量加载。
 
 ```text
 目录（name + description，常驻）→ SKILL.md（激活后加载）→ references/*.md（按需加载）
 ```
+
+批量加载不改变渐进式披露：未激活的 Skill 和无关 reference 仍不会进入上下文，只是避免每个
+必要 reference 都产生一次“模型 → 工具 → 模型”往返。
+
+## 工具并行
+
+模型在同一响应中返回多个只读 `tool_calls` 时，Harness 使用有上限的 `asyncio.gather()`
+并行执行，并按模型原始调用顺序生成 ToolMessage。当前 `read_skill` 和 `web_search` 都声明为
+parallel；未知或未来未声明安全的工具会使整批保守地串行执行。默认并发上限为 4，可通过
+`GAME_MAX_PARALLEL_TOOLS` 调整。
+
+`web_search(queries=[...])` 内部也会并行执行最多 4 个独立查询，确保模型即使只生成一个
+Tool Call，也能避免逐个检索造成的多轮模型往返。
 
 Skill 是文档而非图节点，新增 Skill 只增加目录、不改 Agent 循环。当前包含：
 
@@ -119,14 +132,22 @@ agent_turn → model_call → tool_execution
 
 ## 前端
 
-`POST /ai/chat/stream` 通过 SSE 流式返回四类事件：
+`POST /ai/chat/stream` 通过 SSE 流式返回三类事件：
 
 ```text
 token   # 打字机流式输出
-agent_event # Turn、上下文、模型与工具生命周期事件
 final   # 最终回答
 error   # 错误
 ```
+
+模型的 `astream()` 负责“模型服务 → Harness”的分片读取，`stream_turn()` 将其转换为
+`TextDelta` / `TurnCompleted`，FastAPI 再直接映射为 SSE。这里没有回调和中间 Queue：
+
+```text
+Provider Stream → Agent Stream → SSE → Browser
+```
+
+Agent Stream 只描述调用者需要的产品输出；运行链路、Token、耗时和错误统一交给 Langfuse。
 
 ## 启动
 

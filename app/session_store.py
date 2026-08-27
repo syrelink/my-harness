@@ -7,7 +7,7 @@ from datetime import datetime
 from urllib.parse import quote
 from uuid import uuid4
 
-from langchain_core.messages import messages_from_dict
+from langchain_core.messages import messages_from_dict, messages_to_dict
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -252,9 +252,7 @@ class SessionStore:
     async def save_state(self, session_id: str, state: dict) -> None:
         """把当前近期消息和 ContextSummary 保存为可恢复的 Agent State。"""
         data = dict(state)
-        data["active_messages"] = [
-            message.model_dump() for message in data.get("active_messages", [])
-        ]
+        data["active_messages"] = messages_to_dict(data.get("active_messages", []))
         payload = json.dumps(data, ensure_ascii=False, default=str)
         async with self.pool.connection() as connection:
             async with connection.cursor() as cursor:

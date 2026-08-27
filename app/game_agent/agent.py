@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import time
+from collections.abc import AsyncIterator
 from uuid import uuid4
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -24,7 +24,6 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
 from app.game_agent.multimodal import AttachmentLoader, hydrate_current_images
-from app.game_agent.events import EventEmitter, EventSink
 from app.game_agent.memory import (
     ContextBudget,
     ContextManager,
@@ -32,6 +31,13 @@ from app.game_agent.memory import (
 from app.game_agent.observability import langfuse_handler, observe
 from app.game_agent.prompts import build_agent_system_prompt
 from app.game_agent.skills import SkillRegistry
+from app.game_agent.stream import (
+    AgentStreamEvent,
+    TextDelta,
+    ToolCompleted,
+    ToolStarted,
+    TurnCompleted,
+)
 from app.game_agent.tools import AGENT_TOOLS, skill_registry
 
 
@@ -48,45 +54,6 @@ def create_model(prefix: str = "GAME_ASSISTANT") -> ChatOpenAI:
         base_url=os.getenv(f"{prefix}_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL"),
         temperature=0.2,
     )
-
-
-def truncate_tool_payload(content: str, token_budget: int) -> str:
-    """把工具结果裁到预算内，避免 ToolMessage 挤占过多上下文。
-
-    工具正文最终会成为 ToolMessage，再进入下一次模型输入。如果网页结果过长，会同时
-    增加 Token、延迟和费用。这里用“约 4 字符 = 1 Token”换算粗略字符上限；这是保护
-    上下文的快速估算，并不冒充供应商精确 Tokenizer。
-
-    裁剪优先级：错误 JSON 只保留关键错误字段；搜索 JSON 优先减少 results；其他文本
-    最后使用字符串截断，并附加 ``[truncated]`` 标记。
-    """
-    rough_limit = max(32, token_budget * 4)
-    if len(content) <= rough_limit:
-        return content
-    try:
-        payload = json.loads(content)
-        if payload.get("error"):
-            for message_limit in (240, 120, 60):
-                compact = json.dumps({
-                    "error": str(payload.get("error", ""))[:message_limit],
-                    "error_type": payload.get("error_type", "tool_error"),
-                    "tool": payload.get("tool", "unknown"),
-                }, ensure_ascii=False)
-                if len(compact) <= rough_limit:
-                    return compact
-            return json.dumps({"error": "tool_error"}, ensure_ascii=False)
-
-        results = payload.get("results", [])
-        if isinstance(results, list):
-            payload["results"] = results[:3]
-            compact = json.dumps(payload, ensure_ascii=False)
-            if len(compact) <= rough_limit:
-                return compact
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        pass
-
-    suffix = "\n[truncated]"
-    return content[: max(0, rough_limit - len(suffix))] + suffix
 
 
 class GameAgent:
@@ -113,6 +80,12 @@ class GameAgent:
         self.model = model
         # 字典让工具执行阶段可以用模型返回的 name 快速找到对应工具。
         self.tools = {tool.name: tool for tool in tools}
+        # 调度策略属于宿主，不写进模型 Tool Schema。未知或未声明的工具默认串行。
+        self.parallel_tools = {
+            tool.name
+            for tool in tools
+            if (tool.metadata or {}).get("execution_mode") == "parallel"
+        }
         # bind_tools 只把工具 Schema 告诉模型；此时不会执行任何工具。
         self.model_with_tools = model.bind_tools(tools)
         self.context_manager = context_manager
@@ -121,7 +94,7 @@ class GameAgent:
         self.attachment_loader = attachment_loader
         self.agent_system_prompt = build_agent_system_prompt(skill_registry.catalog_prompt())
         self.default_timeout = float(os.getenv("GAME_TOOL_TIMEOUT_SECONDS", "35"))
-        self.tool_result_tokens = int(os.getenv("GAME_TOOL_RESULT_BUDGET_TOKENS", "2500"))
+        self.max_parallel_tools = max(1, int(os.getenv("GAME_MAX_PARALLEL_TOOLS", "4")))
 
     # ---------- 会话状态 ----------
     async def load_state(self, session_id: str) -> dict:
@@ -137,75 +110,83 @@ class GameAgent:
         await self.session_store.save_state(session_id, state)
 
     # ---------- 一轮主循环 ----------
-    # 装饰器在不修改业务流程的前提下，把整个 run_turn 包装为名为 agent_turn 的
-    # Langfuse 根 Observation。大致等价于 run_turn = observe(name="agent_turn")(run_turn)。
-    @observe(name="agent_turn")
-    async def run_turn(
+    # Langfuse 当前 SDK 支持异步生成器：Observation 会覆盖从第一次迭代到流结束的整轮。
+    # 关闭自动输出采集，避免把每个 TextDelta 重复写入 Trace；模型输出由 Callback 记录。
+    @observe(name="agent_turn", as_type="agent", capture_output=False)
+    async def stream_turn(
         self,
         session_id: str,
         user_message,
         current_attachments: list,
-        on_event: EventSink | None = None,
-    ) -> dict:
-        """执行从一个用户输入到最终回答的完整 Agent Turn。
+    ) -> AsyncIterator[AgentStreamEvent]:
+        """执行完整 Agent Turn，并直接产出调用方可消费的异步事件流。
+
+        整体流程：
+
+            读取 PostgreSQL State
+                      ↓
+                追加 HumanMessage
+                      ↓
+            ┌────── Agent Loop ──────┐
+            │ 模型调用前检查上下文   │
+            │          ↓             │
+            │ 必要时滚动压缩历史     │
+            │          ↓             │
+            │ 流式调用模型           │
+            │          ↓             │
+            │ 有 tool_calls？         │
+            │  ├─ 否 → 退出循环      │
+            │  └─ 是 → 执行工具      │
+            │             ↓          │
+            │        追加 ToolMessage│
+            │             ↓          │
+            │        回到循环顶部    │
+            └────────────────────────┘
+                      ↓
+                保存最新 State
+                      ↓
+              yield TurnCompleted
 
         参数：
         - ``session_id``：数据库会话分区键；
         - ``user_message``：本轮只含文字/附件引用的 HumanMessage；
         - ``current_attachments``：只在本轮临时 Hydrate 的图片引用；
-        - ``on_event``：可选事件消费者，SSE、日志和测试可复用同一协议。
 
         while 循环的退出条件是模型不再返回 tool_calls；跨轮 state 在返回前写入 PostgreSQL。
         """
-        events = EventEmitter(session_id, on_event)
-        await events.emit("turn.started")
-
         # —— 持久层：从 DB 读会话状态（只含跨轮字段） ——
         state = await self.load_state(session_id)
         state["active_messages"] = list(state.get("active_messages", [])) + [user_message]
         state["turn_count"] = int(state.get("turn_count", 0)) + 1
-        started = time.perf_counter()
 
         last_response = AIMessage(content="")
 
         while True:
             # 一次循环代表一次“模型决策步”：测压 → 调模型 →（可能）执行工具。
             # 每次调用模型前测压，超阈值才压缩。
-            update = await self.context_manager.compact(
+            compaction_result = await self.context_manager.compact(
                 state,
                 self.agent_system_prompt,
             )
-            messages = update.pop("active_messages", None)
+            # compact() 返回本次检查结果，不是完整 state：达到阈值时包含新的近期消息和
+            # ContextSummary；没有达到阈值时不修改 state。
+            messages = compaction_result.get("active_messages")
             if messages is not None:
                 state["active_messages"] = messages
             # 只把需要跨轮恢复的字段写回 state。
             for key in ("context_summary", "compaction_count", "summary_version"):
-                if key in update:
-                    state[key] = update[key]
-            measured = update.get("context_metrics", {})
-            attempted = bool(update.get("compaction_attempted", False))
-            await events.emit(
-                "context.measured",
-                estimated_input_tokens=(
-                    measured.get("tokens_before_compaction")
-                    or measured.get("model_input_tokens", 0)
-                ),
-                trigger_tokens=measured.get("trigger_tokens", 0),
-                will_compact=attempted,
-            )
-            if attempted:
-                await events.emit(
-                    "compaction.completed",
-                    compacted=bool(update.get("compacted", False)),
-                    tokens_before=measured.get("tokens_before_compaction", 0),
-                    tokens_after=measured.get("tokens_after_compaction", 0),
-                    converged=measured.get("converged", False),
-                )
-
-            # Agent：调模型（流式），返回 AIMessage 与 usage。
-            await events.emit("model.started")
-            response, usage = await self._call_model(state, current_attachments, session_id, events)
-            await events.emit("model.completed", **usage)
+                if key in compaction_result:
+                    state[key] = compaction_result[key]
+            # Provider Stream → Agent Stream：合并底层消息分片，同时向调用方输出文字事件。
+            response = None
+            async for chunk in self._stream_model(state, current_attachments, session_id):
+                response = chunk if response is None else response + chunk
+                if isinstance(chunk.content, str) and chunk.content:
+                    # Tool Call 参数分片不是用户可见文字，不会进入 TextDelta。
+                    yield TextDelta(chunk.content)
+            response = response or AIMessage(content="")
+            if not response.id:
+                response.id = str(uuid4())
             last_response = response
             state["active_messages"] = list(state["active_messages"]) + [response]
 
@@ -213,31 +194,33 @@ class GameAgent:
                 # 普通文本回答表示任务结束；有 tool_calls 则继续执行工具并进入下一圈。
                 break
 
-            # ToolExecution：手动执行本批工具。
-            tool_messages = await self._execute_tools(response, events)
+            # ToolExecution：手动执行本批工具。工具调用 JSON 不直接给前端，只发稳定状态事件。
+            for call in response.tool_calls:
+                yield ToolStarted(call.get("name", "unknown"))
+            tool_messages = await self._execute_tools(response)
+            for call in response.tool_calls:
+                yield ToolCompleted(call.get("name", "unknown"))
             state["active_messages"] = list(state["active_messages"]) + tool_messages
 
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
         await self.save_state(session_id, state)
-        await events.emit("turn.completed", elapsed_ms=elapsed_ms)
-
-        return {"answer": last_response.text}
+        yield TurnCompleted(last_response.text)
 
     # ---------- 模型调用 ----------
     # 这是 agent_turn 的子 Observation；其中的 LangChain CallbackHandler 还会再创建一个
     # Generation 子记录，所以可以同时看业务步骤耗时和真正的模型 Usage/TTFT。
-    @observe(name="model_call")
-    async def _call_model(
+    @observe(name="model_call", capture_output=False)
+    async def _stream_model(
         self,
         state: dict,
         current_attachments: list,
         session_id: str,
-        events: EventEmitter,
-    ):
-        """组装一次模型请求，流式收集分片并返回 ``(AIMessage, usage)``。
+    ) -> AsyncIterator:
+        """组装临时模型上下文，并原样产出 LangChain 消息分片。
 
         ``model_context`` 是临时视图：System Prompt + ContextSummary + 近期消息。当前 Turn
         有图片时会从 MinIO 读取并临时加入这个列表，但 Base64 不会写回持久 state。
+
+        这里是 Provider Stream 的边界；上层 ``stream_turn`` 再把它转换为 AgentStreamEvent。
         """
         model_context = self.context_manager.build_model_context(state, self.agent_system_prompt)
         model_context = await hydrate_current_images(
@@ -246,74 +229,82 @@ class GameAgent:
             session_id=session_id,
             loader=self.attachment_loader,
         )
-        response = None
         # CallbackHandler 监听 LangChain 模型事件，在 model_call 下创建 Generation，并采集
         # 模型输入输出、Token、耗时和错误。未配置 Langfuse 时 config 为 None。
         config = {"callbacks": [langfuse_handler]} if langfuse_handler else None
         async for chunk in self.model_with_tools.astream(model_context, config=config):
-            # LangChain 的 AIMessageChunk 支持相加，最终合成为一个完整 AIMessage。
-            response = chunk if response is None else response + chunk
-            if isinstance(chunk.content, str) and chunk.content:
-                # 文本一到达就推给 SSE；Tool Call 参数分片不会当作回答文本发送。
-                await events.emit("model.token", content=chunk.content)
-        response = response or AIMessage(content="")
-        if not response.id:
-            response.id = str(uuid4())
-        usage = getattr(response, "usage_metadata", None) or {}
-        return response, usage
+            yield chunk
 
     # ---------- 工具执行 ----------
     # 当前 Observation 代表“一批工具调用”。如果未来需要按工具聚合指标，可以进一步把
     # 单次工具调用抽成一个带 @observe(as_type="tool") 的函数。
     @observe(name="tool_execution")
-    async def _execute_tools(self, response: AIMessage, events: EventEmitter):
-        """按模型返回的 tool_calls 顺序执行工具，并生成 ToolMessage。
+    async def _execute_tools(self, response: AIMessage):
+        """并行执行一批只读工具，并按模型原始调用顺序返回 ToolMessage。
 
         ToolMessage 会放回消息历史供下一次模型读取。单个工具具有超时和异常降级，
-        失败会转成结构化 ToolMessage，而不是直接打断整轮。
-
+        失败会转成结构化 ToolMessage，而不是直接打断整轮。只要本批包含未声明为
+        parallel 的工具，就保守地整批串行；当前 read_skill/web_search 都是只读工具。
         """
-        tool_messages: list[ToolMessage] = []
-        for call in response.tool_calls:
-            name = call.get("name", "unknown")
-            args = call.get("args", {})
-            tool = self.tools.get(name)
-            started = time.perf_counter()
-            await events.emit("tool.started", tool=name)
-            if tool is None:
-                content = json.dumps({"error": f"未知工具：{name}", "error_type": "unknown_tool", "tool": name}, ensure_ascii=False)
+        calls = response.tool_calls
+        can_run_in_parallel = all(
+            call.get("name") in self.parallel_tools for call in calls
+        )
+        if not can_run_in_parallel:
+            return [await self._execute_one_tool(call) for call in calls]
+
+        semaphore = asyncio.Semaphore(self.max_parallel_tools)
+
+        async def execute_limited(call: dict) -> ToolMessage:
+            async with semaphore:
+                return await self._execute_one_tool(call)
+
+        # gather 允许执行乱序完成，但返回值严格保持 calls 的原始顺序。
+        return await asyncio.gather(*(execute_limited(call) for call in calls))
+
+    async def _execute_one_tool(self, call: dict) -> ToolMessage:
+        """执行一个工具调用，并把成功、超时或异常统一转换为 ToolMessage。"""
+        name = call.get("name", "unknown")
+        args = call.get("args", {})
+        tool = self.tools.get(name)
+        if tool is None:
+            content = json.dumps({
+                "error": f"未知工具：{name}",
+                "error_type": "unknown_tool",
+                "tool": name,
+            }, ensure_ascii=False)
+            status = "error"
+        else:
+            try:
+                result = await asyncio.wait_for(
+                    tool.ainvoke(args), timeout=self.default_timeout
+                )
+                content = result if isinstance(result, str) else json.dumps(
+                    result, ensure_ascii=False, default=str
+                )
+                status = "success"
+            except asyncio.TimeoutError:
+                content = json.dumps({
+                    "error": f"{name} 执行超时",
+                    "error_type": "tool_timeout",
+                    "tool": name,
+                }, ensure_ascii=False)
                 status = "error"
-                error_type = "unknown_tool"
-            else:
-                try:
-                    # wait_for 提供工具级超时边界，避免一个外部服务无限阻塞 Agent Loop。
-                    result = await asyncio.wait_for(tool.ainvoke(args), timeout=self.default_timeout)
-                    content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-                    status = "success"
-                    error_type = None
-                except asyncio.TimeoutError:
-                    content = json.dumps({"error": f"{name} 执行超时", "error_type": "tool_timeout", "tool": name}, ensure_ascii=False)
-                    status = "error"
-                    error_type = "tool_timeout"
-                except Exception as exc:
-                    content = json.dumps({"error": str(exc), "error_type": type(exc).__name__, "tool": name}, ensure_ascii=False)
-                    status = "error"
-                    error_type = type(exc).__name__
-            content = truncate_tool_payload(content, self.tool_result_tokens)
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            await events.emit(
-                "tool.completed",
-                tool=name,
-                status=status,
-                latency_ms=latency_ms,
-                error_type=error_type,
-            )
-            tool_messages.append(ToolMessage(
-                content=content, tool_call_id=call.get("id", ""), name=name,
-                status="error" if status == "error" else "success",
-                id=str(uuid4()),
-            ))
-        return tool_messages
+            except Exception as exc:
+                content = json.dumps({
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "tool": name,
+                }, ensure_ascii=False)
+                status = "error"
+
+        return ToolMessage(
+            content=content,
+            tool_call_id=call.get("id", ""),
+            name=name,
+            status="error" if status == "error" else "success",
+            id=str(uuid4()),
+        )
 
 def build_game_assistant(session_store, attachment_loader: AttachmentLoader | None = None) -> GameAgent:
     """在 FastAPI 启动时组装并返回一个可复用的 ``GameAgent`` 实例。

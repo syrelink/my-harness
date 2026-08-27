@@ -3,18 +3,18 @@
 先理解 Python 装饰器：
 
     @observe(name="agent_turn")
-    async def run_turn(...):
+    async def stream_turn(...):
         ...
 
 在 Python 解释器看来，大致等价于：
 
-    async def run_turn(...):
+    async def stream_turn(...):
         ...
 
-    run_turn = observe(name="agent_turn")(run_turn)
+    stream_turn = observe(name="agent_turn")(stream_turn)
 
 也就是说，``observe(name="agent_turn")`` 先创建一个“装饰器函数”，这个装饰器再
-接收原来的 ``run_turn``，返回一个包装后的新函数。调用新函数时，包装器会在原函数
+接收原来的 ``stream_turn``，返回一个包装后的新函数。调用新函数时，包装器会在原函数
 执行前开始计时/创建 Observation，执行后记录输出和耗时，异常时记录错误，然后仍然
 把原函数的返回值或异常交还给调用方。业务函数本身不需要手写这些重复逻辑。
 

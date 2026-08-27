@@ -1,6 +1,5 @@
 """Game_Rover 单 Agent Harness API。"""
 
-import asyncio
 import json
 import logging
 import os
@@ -16,7 +15,13 @@ from langchain_core.messages import HumanMessage
 
 from app.game_agent import build_game_assistant
 from app.game_agent.multimodal import render_attachment_references
-from app.game_agent.events import AgentEvent
+from app.game_agent.stream import (
+    TextDelta,
+    ToolCompleted,
+    ToolStarted,
+    TurnCompleted,
+    TurnError,
+)
 from app.attachment_store import MinioAttachmentStore
 from app.game_agent.models import (
     AttachmentRef,
@@ -79,6 +84,13 @@ async def chat_page():
     return FileResponse(WEB_DIR / "index.html")
 
 
+@app.get("/favicon.svg", include_in_schema=False)
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """返回站点图标；兼容浏览器默认请求的 /favicon.ico。"""
+    return FileResponse(WEB_DIR / "favicon.svg", media_type="image/svg+xml")
+
+
 @app.post("/ai/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     stored_attachments = await app.state.session_store.record_user_message(
@@ -87,13 +99,16 @@ async def chat(req: ChatRequest) -> ChatResponse:
         req.attachments,
     )
     attachment_refs = _attachment_refs(stored_attachments)
-    result = await app.state.game_assistant.run_turn(
+    answer = ""
+    async for event in app.state.game_assistant.stream_turn(
         req.session_id,
         _user_message(req, attachment_refs),
         [item.model_dump() for item in attachment_refs],
-    )
-    await app.state.session_store.record_assistant_message(req.session_id, result["answer"])
-    return ChatResponse(answer=result["answer"])
+    ):
+        if isinstance(event, TurnCompleted):
+            answer = event.answer
+    await app.state.session_store.record_assistant_message(req.session_id, answer)
+    return ChatResponse(answer=answer)
 
 
 def _sse(event: str, data: dict) -> str:
@@ -133,44 +148,29 @@ async def stream_chat(req: ChatRequest):
             req.attachments,
         )
         attachment_refs = _attachment_refs(stored_attachments)
-        queue: asyncio.Queue = asyncio.Queue()
-
-        async def on_event(event: AgentEvent) -> None:
-            await queue.put({"kind": "agent_event", "event": event})
-
-        async def runner() -> None:
-            try:
-                result = await runtime.run_turn(
-                    req.session_id,
-                    _user_message(req, attachment_refs),
-                    [item.model_dump() for item in attachment_refs],
-                    on_event=on_event,
-                )
-                await queue.put({"kind": "__done__", "result": result})
-            except Exception as exc:
-                await queue.put({"kind": "__error__", "error": exc})
-
-        task = asyncio.create_task(runner())
-        while True:
-            event = await queue.get()
-            kind = event.get("kind")
-            if kind == "__done__":
-                result = event["result"]
-                await app.state.session_store.record_assistant_message(req.session_id, result["answer"])
-                yield _sse("final", {"answer": result["answer"]})
-                break
-            if kind == "__error__":
-                exc = event["error"]
-                logging.exception("Game_Rover 流式执行失败")
-                yield _sse("error", {"detail": str(exc)})
-                break
-            if kind == "agent_event":
-                agent_event = event["event"]
-                if agent_event.event_type == "model.token":
-                    yield _sse("token", agent_event.payload)
-                else:
-                    yield _sse("agent_event", agent_event.model_dump(mode="json"))
-        await task
+        try:
+            async for event in runtime.stream_turn(
+                req.session_id,
+                _user_message(req, attachment_refs),
+                [item.model_dump() for item in attachment_refs],
+            ):
+                if isinstance(event, TextDelta):
+                    yield _sse("token", {"content": event.content})
+                elif isinstance(event, ToolStarted):
+                    yield _sse("tool_started", {"name": event.name})
+                elif isinstance(event, ToolCompleted):
+                    yield _sse("tool_completed", {"name": event.name})
+                elif isinstance(event, TurnCompleted):
+                    await app.state.session_store.record_assistant_message(
+                        req.session_id, event.answer
+                    )
+                    yield _sse("final", {"answer": event.answer})
+                elif isinstance(event, TurnError):
+                    yield _sse("error", {"detail": event.detail})
+        except Exception as exc:
+            logging.exception("Game_Rover 流式执行失败")
+            error = TurnError(str(exc))
+            yield _sse("error", {"detail": error.detail})
 
     return StreamingResponse(
         events(),
@@ -256,6 +256,6 @@ async def health():
         "status": "ok",
         "architecture": "single-agent-budgeted-harness",
         "persistence": "postgresql",
-        "tools": ["read_skill_file", "web_search"],
+        "tools": ["read_skill", "web_search"],
         "skills": [item.name for item in app.state.game_assistant.skill_registry.catalog()],
     }

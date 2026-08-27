@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <title>GameRover</title>
   <script>document.documentElement.dataset.theme = localStorage.getItem('gamerover-theme') || 'dark';</script>
   <style>
@@ -114,8 +115,8 @@
     .jump-bottom { position: absolute; right: 25px; bottom: 17px; display: none; width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 50%; background: #2d2e33; box-shadow: 0 5px 18px rgba(0,0,0,.3); }
     .jump-bottom.visible { display: block; }
 
-    .markdown h1, .markdown h2, .markdown h3 { margin: 1.35em 0 .55em; line-height: 1.35; }
-    .markdown h1 { font-size: 1.45em; } .markdown h2 { font-size: 1.26em; } .markdown h3 { font-size: 1.1em; }
+    .markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 { margin: 1.35em 0 .55em; line-height: 1.35; }
+    .markdown h1 { font-size: 1.45em; } .markdown h2 { font-size: 1.26em; } .markdown h3 { font-size: 1.1em; } .markdown h4, .markdown h5, .markdown h6 { font-size: 1em; }
     .markdown p { margin: .7em 0; }
     .markdown ul, .markdown ol { margin: .65em 0; padding-left: 1.55em; }
     .markdown li { margin: .3em 0; }
@@ -260,6 +261,8 @@
     </section>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
   <script>
     const messages = document.querySelector('#messages');
     const form = document.querySelector('#chatForm');
@@ -318,82 +321,9 @@
       if (value < 10000) return `${(value / 1000).toFixed(2)}s`;
       return `${(value / 1000).toFixed(1)}s`;
     }
-    function inlineMarkdown(value) {
-      const placeholders = [];
-      let text = value.replace(/`([^`]+)`/g, (_, code) => { placeholders.push(`<code>${code}</code>`); return `@@MD${placeholders.length - 1}@@`; });
-      text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => { placeholders.push(`<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`); return `@@MD${placeholders.length - 1}@@`; });
-      text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\*([^*]+)\*/g, '<em>$1</em>');
-      text = text.replace(/(^|\s)(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
-      return text.replace(/@@MD(\d+)@@/g, (_, index) => placeholders[Number(index)]);
-    }
     function renderMarkdown(source) {
-      const lines = escapeHtml(source || '').split('\n');
-      const html = [];
-      let list = null;
-      let paragraph = [];
-      let code = false;
-      let codeLines = [];
-      let nextOrderedNumber = 1;
-      const closeParagraph = () => { if (paragraph.length) { html.push(`<p>${paragraph.map(inlineMarkdown).join('<br>')}</p>`); paragraph = []; } };
-      const closeList = () => { if (list) { html.push(`</${list}>`); list = null; } };
-      const tableCells = line => {
-        let value = line.trim();
-        if (!value.includes('|')) return null;
-        if (value.startsWith('|')) value = value.slice(1);
-        if (value.endsWith('|')) value = value.slice(0, -1);
-        const cells = value.split('|').map(cell => cell.trim());
-        return cells.length > 1 ? cells : null;
-      };
-      const tableAlignment = cell => {
-        const value = cell.trim();
-        if (!/^:?-{3,}:?$/.test(value)) return null;
-        if (value.startsWith(':') && value.endsWith(':')) return 'center';
-        if (value.endsWith(':')) return 'right';
-        return 'left';
-      };
-      for (let index = 0; index < lines.length; index += 1) {
-        const line = lines[index];
-        if (line.startsWith('```')) { closeParagraph(); closeList(); nextOrderedNumber = 1; if (code) { html.push(`<pre><code>${codeLines.join('\n')}</code></pre>`); codeLines = []; } code = !code; continue; }
-        if (code) { codeLines.push(line); continue; }
-        const headers = tableCells(line);
-        const separators = index + 1 < lines.length ? tableCells(lines[index + 1]) : null;
-        const alignments = separators?.map(tableAlignment);
-        if (headers && separators && headers.length === separators.length && alignments.every(Boolean)) {
-          closeParagraph(); closeList(); nextOrderedNumber = 1;
-          const rows = [];
-          index += 2;
-          while (index < lines.length) {
-            const cells = tableCells(lines[index]);
-            if (!cells || cells.length !== headers.length) break;
-            rows.push(cells);
-            index += 1;
-          }
-          index -= 1;
-          const head = headers.map((cell, cellIndex) => `<th style="text-align:${alignments[cellIndex]}">${inlineMarkdown(cell)}</th>`).join('');
-          const body = rows.map(cells => `<tr>${cells.map((cell, cellIndex) => `<td style="text-align:${alignments[cellIndex]}">${inlineMarkdown(cell)}</td>`).join('')}</tr>`).join('');
-          html.push(`<div class="markdown-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
-          continue;
-        }
-        const heading = line.match(/^(#{1,3})\s+(.+)$/);
-        const bullet = line.match(/^\s*[-*+]\s+(.+)$/);
-        const ordered = line.match(/^\s*(\d+)[.)]\s+(.+)$/);
-        if (!line.trim()) { closeParagraph(); closeList(); continue; }
-        if (/^---+$/.test(line.trim())) { closeParagraph(); closeList(); nextOrderedNumber = 1; html.push('<hr>'); continue; }
-        if (heading) { closeParagraph(); closeList(); nextOrderedNumber = 1; const level = heading[1].length; html.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`); continue; }
-        if (line.startsWith('&gt; ')) { closeParagraph(); closeList(); nextOrderedNumber = 1; html.push(`<blockquote>${inlineMarkdown(line.slice(5))}</blockquote>`); continue; }
-        if (bullet) { closeParagraph(); if (list !== 'ul') { closeList(); list = 'ul'; html.push('<ul>'); } html.push(`<li>${inlineMarkdown(bullet[1])}</li>`); continue; }
-        if (ordered) {
-          closeParagraph();
-          const explicitNumber = Number(ordered[1]);
-          const start = explicitNumber > 1 ? explicitNumber : nextOrderedNumber;
-          if (list !== 'ol') { closeList(); list = 'ol'; html.push(`<ol${start === 1 ? '' : ` start="${start}"`}>`); }
-          html.push(`<li>${inlineMarkdown(ordered[2])}</li>`); nextOrderedNumber = start + 1; continue;
-        }
-        closeList(); nextOrderedNumber = 1; paragraph.push(line);
-      }
-      closeParagraph(); closeList();
-      if (codeLines.length) html.push(`<pre><code>${codeLines.join('\n')}</code></pre>`);
-      return html.join('');
+      const rawHtml = marked.parse(source || '', {breaks: true, gfm: true});
+      return DOMPurify.sanitize(rawHtml, {ADD_ATTR: ['target', 'rel']});
     }
     function welcomeMarkup() {
       return `<div class="welcome"><div class="welcome-symbol">✣</div><h1>我是 GameRover</h1><p>可以查询玩法、角色、任务与版本资讯。</p><div class="suggestions"><button class="suggestion" data-prompt="艾尔登法环的新手开荒路线怎么规划？">艾尔登法环开荒建议</button><button class="suggestion" data-prompt="绝区零最近有什么版本更新？">绝区零最新资讯</button><button class="suggestion" data-prompt="我在明日方舟卡关了，有点烦，陪我聊聊。">聊聊游戏挫败</button></div></div>`;
@@ -539,13 +469,14 @@
         const response = await fetch('/ai/chat/stream', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: text.trim(), session_id: currentSessionId, attachments: outgoingAttachments})});
         if (!response.ok || !response.body) throw new Error('无法建立流式连接');
         const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let finalData = null; let streamed = '';
-        let streamRenderFrame = null; let streamTextNode = null;
+        let streamRenderFrame = null;
         const flushStreamRender = () => {
           if (streamRenderFrame) { cancelAnimationFrame(streamRenderFrame); streamRenderFrame = null; }
           if (!streamed) return;
-          loadingBubble.classList.remove('thinking', 'markdown'); loadingBubble.classList.add('streaming-text');
-          if (!streamTextNode) { streamTextNode = document.createTextNode(''); loadingBubble.replaceChildren(streamTextNode); }
-          streamTextNode.data = streamed; scrollToBottom();
+          loadingBubble.classList.remove('thinking', 'streaming-text');
+          loadingBubble.classList.add('markdown');
+          loadingBubble.innerHTML = renderMarkdown(streamed);
+          scrollToBottom();
         };
         const scheduleStreamRender = () => {
           if (streamRenderFrame) return;
@@ -558,6 +489,8 @@
             if (!block.trim()) continue;
             const packet = parseSseBlock(block);
             if (packet.event === 'token') { streamed += packet.data.content || ''; scheduleStreamRender(); }
+            else if (packet.event === 'tool_started' && !streamed) { loadingBubble.textContent = `正在执行工具：${packet.data.name || 'unknown'}…`; }
+            else if (packet.event === 'tool_completed' && !streamed) { loadingBubble.textContent = `工具执行完成，正在整理回答…`; }
             else if (packet.event === 'final') finalData = packet.data;
             else if (packet.event === 'error') throw new Error(packet.data.detail);
           }
