@@ -56,7 +56,7 @@ def create_model(prefix: str = "GAME_ASSISTANT") -> ChatOpenAI:
     )
 
 
-class GameAgent:
+class AgentHarness:
     """单 Agent Harness：普通 dict 状态 + while 循环 + 手动工具执行。"""
 
     def __init__(
@@ -117,7 +117,6 @@ class GameAgent:
         self,
         session_id: str,
         user_message,
-        current_attachments: list,
     ) -> AsyncIterator[AgentStreamEvent]:
         """执行完整 Agent Turn，并直接产出调用方可消费的异步事件流。
 
@@ -149,8 +148,7 @@ class GameAgent:
 
         参数：
         - ``session_id``：数据库会话分区键；
-        - ``user_message``：本轮只含文字/附件引用的 HumanMessage；
-        - ``current_attachments``：只在本轮临时 Hydrate 的图片引用；
+        - ``user_message``：本轮只含文字和结构化图片引用的 HumanMessage；
 
         while 循环的退出条件是模型不再返回 tool_calls；跨轮 state 在返回前写入 PostgreSQL。
         """
@@ -179,10 +177,9 @@ class GameAgent:
                     state[key] = compaction_result[key]
             # Provider Stream → Agent Stream：合并底层消息分片，同时向调用方输出文字事件。
             response = None
-            async for chunk in self._stream_model(state, current_attachments, session_id):
+            async for chunk in self._stream_model(state, session_id):
                 response = chunk if response is None else response + chunk
                 if isinstance(chunk.content, str) and chunk.content:
-                    # Tool Call 参数分片不是用户可见文字，不会进入 TextDelta。
                     yield TextDelta(chunk.content)
             response = response or AIMessage(content="")
             if not response.id:
@@ -203,7 +200,7 @@ class GameAgent:
             state["active_messages"] = list(state["active_messages"]) + tool_messages
 
         await self.save_state(session_id, state)
-        yield TurnCompleted(last_response.text)
+        yield TurnCompleted(    )
 
     # ---------- 模型调用 ----------
     # 这是 agent_turn 的子 Observation；其中的 LangChain CallbackHandler 还会再创建一个
@@ -212,20 +209,19 @@ class GameAgent:
     async def _stream_model(
         self,
         state: dict,
-        current_attachments: list,
         session_id: str,
     ) -> AsyncIterator:
         """组装临时模型上下文，并原样产出 LangChain 消息分片。
 
         ``model_context`` 是临时视图：System Prompt + ContextSummary + 近期消息。当前 Turn
-        有图片时会从 MinIO 读取并临时加入这个列表，但 Base64 不会写回持久 state。
+        有图片时会从最新 HumanMessage 的 image block 读取引用，并临时转成 image_url，
+        但 Base64 不会写回持久 state。
 
         这里是 Provider Stream 的边界；上层 ``stream_turn`` 再把它转换为 AgentStreamEvent。
         """
         model_context = self.context_manager.build_model_context(state, self.agent_system_prompt)
         model_context = await hydrate_current_images(
             model_context,
-            current_attachments,
             session_id=session_id,
             loader=self.attachment_loader,
         )
@@ -306,17 +302,17 @@ class GameAgent:
             id=str(uuid4()),
         )
 
-def build_game_assistant(session_store, attachment_loader: AttachmentLoader | None = None) -> GameAgent:
-    """在 FastAPI 启动时组装并返回一个可复用的 ``GameAgent`` 实例。
+def build_harness(session_store, attachment_loader: AttachmentLoader | None = None) -> AgentHarness:
+    """在 FastAPI 启动时组装并返回一个可复用的 Agent Harness 实例。
 
     这是项目的 Composition Root：集中创建模型、读取上下文预算、创建 ContextManager，
     再注入全局 Tool/Skill Registry、数据库和附件加载器。请求处理函数只调用组装好的
-    Agent，不需要了解这些对象如何构造。
+    Harness，不需要了解这些对象如何构造。
     """
     model = create_model()
     budget = ContextBudget.from_env()
     context_manager = ContextManager(model, budget)
-    return GameAgent(
+    return AgentHarness(
         model=model,
         tools=AGENT_TOOLS,
         context_manager=context_manager,

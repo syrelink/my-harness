@@ -270,4 +270,6 @@ class SessionStore:
     def _title(question: str) -> str:
         """从首条问题生成简短的默认会话标题。"""
         normalized = " ".join(question.split())
+        if not normalized:
+            return "图片对话"
         return normalized[:28] + ("…" if len(normalized) > 28 else "")

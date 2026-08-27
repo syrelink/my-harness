@@ -4,6 +4,6 @@
 外部模块只需要从这里导入构建函数。
 """
 
-from app.game_agent.agent import GameAgent, build_game_assistant
+from app.game_agent.agent import AgentHarness, build_harness
 
-__all__ = ["GameAgent", "build_game_assistant"]
+__all__ = ["AgentHarness", "build_harness"]

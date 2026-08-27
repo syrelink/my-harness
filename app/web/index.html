@@ -457,7 +457,7 @@
       if (busy || (!text.trim() && !pendingAttachments.length)) return;
       saveCurrentSession();
       const outgoingAttachments = pendingAttachments.map(({id, ...item}) => item);
-      const displayText = text.trim() || '请分析我上传的图片。';
+      const displayText = text.trim() || '已上传图片';
       busy = true; sendButton.disabled = true; addMessage('user', displayText, false, outgoingAttachments);
       // outgoingAttachments 已保存本次请求的独立快照，发送后立即清空输入区。
       pendingAttachments = [];

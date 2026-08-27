@@ -13,7 +13,7 @@ GameRover 是一个面向中文玩家的游戏资讯与玩法助手。它不使�
       └─ 有 tool_calls → 手动执行工具 → 回到压缩测压 → Agent
 ```
 
-整个循环在 `agent.py` 的 `GameAgent.stream_turn()` 里，是一个普通 `while True`：
+整个循环在 `agent.py` 的 `AgentHarness.stream_turn()` 里，是一个普通 `while True`：
 
 ```python
 while True:

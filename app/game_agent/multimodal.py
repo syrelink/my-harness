@@ -14,61 +14,94 @@ from app.game_agent.models import AttachmentRef
 AttachmentLoader = Callable[[str, str], Awaitable[dict | None]]
 
 
-def render_attachment_references(refs: list[AttachmentRef | dict]) -> str:
-    """把附件元数据写成消息中的轻量引用，绝不包含 Base64。"""
-    # 入口统一校验，避免文件名、MIME 或大小不合法的数据进入持久消息。
-    normalized = [AttachmentRef.model_validate(item) for item in refs]
-    # attachment:// 是 Harness 内部引用协议，模型请求前才会解析为真实图片块。
-    return "\n".join(
-        f"- attachment://{item.attachment_id} name={item.name} "
-        f"mime_type={item.mime_type} size={item.size}"
-        for item in normalized
-    )
+def _image_ref_from_block(block: object) -> AttachmentRef | None:
+    """从持久消息的 image block 中取出附件引用。"""
+    if not isinstance(block, dict) or block.get("type") != "image":
+        return None
+    attachment = block.get("attachment")
+    if not attachment:
+        return None
+    return AttachmentRef.model_validate(attachment)
+
+
+def _image_ref_text(ref: AttachmentRef) -> dict:
+    """把历史图片引用降级成普通文本，避免旧图片反复进入模型请求。"""
+    return {
+        "type": "text",
+        "text": (
+            f"[历史图片: attachment_id={ref.attachment_id}, "
+            f"name={ref.name}, mime_type={ref.mime_type}, size={ref.size}]"
+        ),
+    }
+
+
+async def _image_url_block(
+    ref: AttachmentRef,
+    *,
+    session_id: str,
+    loader: AttachmentLoader,
+) -> dict:
+    """按附件引用从 MinIO 读取图片，并转换为模型供应商支持的 image_url block。"""
+    stored = await loader(ref.attachment_id, session_id)
+    if stored is None:
+        raise ValueError(f"图片附件不存在或不属于当前会话：{ref.attachment_id}")
+    mime_type = str(stored.get("mime_type") or ref.mime_type)
+    if not mime_type.startswith("image/"):
+        raise ValueError(f"附件不是图片：{ref.attachment_id}")
+    raw = bytes(stored["content"])
+    encoded = base64.b64encode(raw).decode("ascii")
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
+    }
 
 
 async def hydrate_current_images(
     model_context: list[AnyMessage],
-    refs: list[AttachmentRef | dict],
     *,
     session_id: str,
     loader: AttachmentLoader | None,
 ) -> list[AnyMessage]:
-    """从 MinIO 读取本轮图片，生成临时模型消息，不修改持久化消息。"""
-    normalized = [AttachmentRef.model_validate(item) for item in refs]
-    if not normalized:
+    """把最新用户消息里的结构化图片引用临时转换成 image_url。
+
+    持久状态里保存的是 ``{"type": "image", "attachment": ...}``。模型供应商不认识
+    这个内部格式，所以只在请求模型前把最新 HumanMessage 的图片引用 hydrate 成
+    ``image_url``；历史图片引用则保留为文本说明，不重新加载原图。
+    """
+    latest_human_index = next(
+        (
+            index
+            for index in range(len(model_context) - 1, -1, -1)
+            if isinstance(model_context[index], HumanMessage)
+        ),
+        None,
+    )
+    if latest_human_index is None:
         return list(model_context)
-    if loader is None:
-        raise RuntimeError("存在图片引用，但没有配置附件读取器")
 
-    # Provider 不认识 attachment_id，因此在请求边界读取原图并转换成 image_url。
-    image_blocks = []
-    for ref in normalized:
-        stored = await loader(ref.attachment_id, session_id)
-        if stored is None:
-            raise ValueError(f"图片附件不存在或不属于当前会话：{ref.attachment_id}")
-        mime_type = str(stored.get("mime_type") or ref.mime_type)
-        if not mime_type.startswith("image/"):
-            raise ValueError(f"附件不是图片：{ref.attachment_id}")
-        raw = bytes(stored["content"])
-        encoded = base64.b64encode(raw).decode("ascii")
-        image_blocks.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
-        })
-
-    # 复制列表和 HumanMessage；Base64 只进入这个临时副本，不会写回 Agent State。
     hydrated = list(model_context)
-    # 图片属于本轮最新用户输入，因此从后向前寻找最近的 HumanMessage。
-    for index in range(len(hydrated) - 1, -1, -1):
-        message = hydrated[index]
+    for index, message in enumerate(hydrated):
         if not isinstance(message, HumanMessage):
             continue
-        content = message.content if isinstance(message.content, list) else [
-            {"type": "text", "text": str(message.content)}
-        ]
-        hydrated[index] = message.model_copy(update={"content": [*content, *image_blocks]})
-        return hydrated
-    raise ValueError("当前模型上下文中没有可挂载图片的用户消息")
+        if not isinstance(message.content, list):
+            continue
+        content = []
+        changed = False
+        for block in message.content:
+            ref = _image_ref_from_block(block)
+            if ref is None:
+                content.append(block)
+                continue
+            changed = True
+            if index == latest_human_index:
+                if loader is None:
+                    raise RuntimeError("存在图片引用，但没有配置附件读取器")
+                content.append(await _image_url_block(ref, session_id=session_id, loader=loader))
+            else:
+                content.append(_image_ref_text(ref))
+        if changed:
+            hydrated[index] = message.model_copy(update={"content": content})
+    return hydrated
 
 
 def decode_data_url(
