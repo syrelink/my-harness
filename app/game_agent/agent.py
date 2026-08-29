@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
@@ -33,6 +34,8 @@ from app.game_agent.prompts import build_agent_system_prompt
 from app.game_agent.skills import SkillRegistry
 from app.game_agent.stream import (
     AgentStreamEvent,
+    ModelCompleted,
+    ModelStarted,
     TextDelta,
     ToolCompleted,
     ToolStarted,
@@ -177,10 +180,13 @@ class AgentHarness:
                     state[key] = compaction_result[key]
             # Provider Stream → Agent Stream：合并底层消息分片，同时向调用方输出文字事件。
             response = None
+            model_started_at = time.perf_counter()
+            yield ModelStarted()
             async for chunk in self._stream_model(state, session_id):
                 response = chunk if response is None else response + chunk
                 if isinstance(chunk.content, str) and chunk.content:
                     yield TextDelta(chunk.content)
+            yield ModelCompleted(int((time.perf_counter() - model_started_at) * 1000))
             response = response or AIMessage(content="")
             if not response.id:
                 response.id = str(uuid4())
@@ -194,13 +200,15 @@ class AgentHarness:
             # ToolExecution：手动执行本批工具。工具调用 JSON 不直接给前端，只发稳定状态事件。
             for call in response.tool_calls:
                 yield ToolStarted(call.get("name", "unknown"))
+            tool_started_at = time.perf_counter()
             tool_messages = await self._execute_tools(response)
+            tool_elapsed_ms = int((time.perf_counter() - tool_started_at) * 1000)
             for call in response.tool_calls:
-                yield ToolCompleted(call.get("name", "unknown"))
+                yield ToolCompleted(call.get("name", "unknown"), elapsed_ms=tool_elapsed_ms)
             state["active_messages"] = list(state["active_messages"]) + tool_messages
 
         await self.save_state(session_id, state)
-        yield TurnCompleted(    )
+        yield TurnCompleted(last_response.text)
 
     # ---------- 模型调用 ----------
     # 这是 agent_turn 的子 Observation；其中的 LangChain CallbackHandler 还会再创建一个

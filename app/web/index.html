@@ -14,6 +14,7 @@
       --surface: #292a2e;
       --surface-2: #303136;
       --line: #37383d;
+      --line-soft: rgba(255, 255, 255, .09);
       --text: #ececf1;
       --muted: #9699a2;
       --blue: #4d6bfe;
@@ -24,11 +25,12 @@
     }
     :root[data-theme="light"] {
       color-scheme: light;
-      --bg: #ffffff;
-      --sidebar: #f7f7f8;
+      --bg: #f7f7f7;
+      --sidebar: #f7f7f7;
       --surface: #f3f4f6;
       --surface-2: #e9ebef;
-      --line: #e2e4e8;
+      --line: #e6e6e6;
+      --line-soft: #e5e7eb;
       --text: #202124;
       --muted: #6f737c;
       --blue-soft: rgba(77, 107, 254, .1);
@@ -48,18 +50,21 @@
     .history, .chat { min-width: 0; min-height: 0; }
     .history { display: flex; overflow: hidden; flex-direction: column; border-right: 1px solid var(--line); background: var(--sidebar); opacity: 1; transform: translateX(0); transition: opacity .18s, transform .22s; }
     .drawer-closed .history { border-right: 0; opacity: 0; pointer-events: none; transform: translateX(-100%); }
-    .history-head { padding: 18px 13px 10px; }
-    .brand { display: flex; align-items: center; justify-content: space-between; gap: 9px; padding: 3px 7px 17px; font-size: 16px; font-weight: 700; }
+    .history-head { padding: 14px 9px 10px; }
+    .brand { display: flex; align-items: center; justify-content: space-between; gap: 9px; padding: 3px 7px 18px; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
     .brand-name { display: flex; min-width: 0; align-items: center; gap: 9px; }
-    .brand-symbol { color: #8ea0ff; font-size: 20px; }
-    .new-chat { width: 100%; padding: 11px 13px; border: 1px solid #5369d7; border-radius: 10px; background: var(--blue-soft); text-align: left; }
-    .new-chat:hover { background: rgba(77, 107, 254, .24); }
-    .history-label { padding: 14px 20px 7px; color: var(--muted); font-size: 12px; }
-    .session-list { flex: 1; min-height: 0; overflow: auto; padding: 0 8px 18px; }
-    .session-row { position: relative; display: flex; width: 100%; margin: 2px 0; align-items: center; border-radius: 8px; color: #c7c9d0; }
-    .session-row:hover { background: #242529; }
-    .session-row.active { color: #fff; background: var(--surface); }
-    .session-item { min-width: 0; flex: 1; padding: 10px 7px 10px 12px; overflow: hidden; border: 0; border-radius: 8px; color: inherit; background: transparent; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+    .brand-icon { width: 24px; height: 24px; border-radius: 7px; box-shadow: none; }
+    .brand-actions { display: flex; align-items: center; gap: 4px; }
+    .new-chat { display: flex; width: 100%; min-height: 44px; align-items: center; gap: 10px; padding: 10px 12px; border: 0; border-radius: 11px; color: var(--text); background: transparent; font-size: 14px; font-weight: 500; text-align: left; transition: background .16s, box-shadow .16s; }
+    .new-chat:hover { background: rgba(255,255,255,.075); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+    .new-chat:focus-visible { outline: 0; box-shadow: 0 0 0 2px rgba(120, 142, 255, .45); }
+    .new-chat-plus { display: grid; width: 18px; height: 18px; flex: 0 0 18px; place-items: center; border-radius: 0; background: transparent; box-shadow: none; color: currentColor; font-size: 20px; font-weight: 400; line-height: 1; }
+    .history-label { padding: 17px 13px 8px; color: var(--muted); font-size: 14px; font-weight: 500; }
+    .session-list { flex: 1; min-height: 0; overflow: auto; padding: 0 7px 18px; }
+    .session-row { position: relative; display: flex; width: 100%; margin: 1px 0; align-items: center; border-radius: 9px; color: #d5d7dc; font-size: 14px; font-weight: 400; }
+    .session-row:hover { background: rgba(255,255,255,.075); }
+    .session-row.active { color: #fff; background: rgba(255,255,255,.105); }
+    .session-item { min-width: 0; flex: 1; padding: 9px 7px 9px 9px; overflow: hidden; border: 0; border-radius: 9px; color: inherit; background: transparent; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
     .session-more { display: grid; width: 32px; height: 32px; flex: 0 0 32px; margin-right: 3px; place-items: center; border: 0; border-radius: 50%; color: var(--muted); background: transparent; font-size: 17px; letter-spacing: 1px; opacity: 0; }
     .session-row:hover .session-more, .session-row.menu-open .session-more { opacity: 1; }
     .session-more:hover, .session-row.menu-open .session-more { color: var(--text); background: rgba(127,127,127,.14); }
@@ -75,45 +80,42 @@
     .session-rename-input { width: 100%; padding: 8px 10px; border: 0; border-radius: 7px; color: var(--text); background: var(--surface); outline: 0; }
     .history-empty { padding: 16px 12px; color: var(--muted); font-size: 13px; line-height: 1.6; }
 
-    .chat { display: flex; flex-direction: column; background: var(--bg); }
-    .topbar { display: flex; height: var(--header-height); min-height: var(--header-height); flex: 0 0 var(--header-height); align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid var(--line); }
-    .chat.welcome-mode .topbar { position: absolute; z-index: 3; top: 0; right: 0; left: 238px; border-bottom: 0; background: transparent; pointer-events: none; }
-    .drawer-closed .chat.welcome-mode .topbar { left: 0; }
-    .chat.welcome-mode .topbar-left { visibility: hidden; }
-    .chat.welcome-mode .topbar-actions { margin-left: auto; pointer-events: auto; }
-    .topbar-left, .topbar-actions { display: flex; min-width: 0; align-items: center; gap: 10px; }
-    .topbar-left { flex: 1; }
-    .topbar-actions { flex: 0 0 auto; }
+    .chat { position: relative; display: flex; flex-direction: column; background: var(--bg); }
+    .topbar { display: none; }
     .topbar-icon { display: grid; width: 34px; height: 34px; flex: 0 0 34px; place-items: center; border: 0; border-radius: 8px; color: var(--muted); background: transparent; }
     .topbar-icon:hover { color: var(--text); background: var(--surface); }
     .topbar-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
-    .drawer-reopen { display: none; }
+    .drawer-reopen { position: fixed; z-index: 12; top: 14px; left: 14px; display: none; background: rgba(255,255,255,.08); backdrop-filter: blur(12px); }
     .drawer-closed .drawer-reopen { display: grid; }
-    .topbar-title { min-width: 0; font-size: 14px; font-weight: 650; white-space: nowrap; }
+    .topbar-title { display: none; }
     .messages-wrap { position: relative; flex: 1; min-height: 0; }
     .messages { position: absolute; inset: 0; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; padding: 36px clamp(24px, 7vw, 108px) 48px; }
-    .welcome { max-width: 680px; margin: 11vh auto 0; text-align: center; }
-    .welcome-symbol { color: #899cff; font-size: 42px; }
-    .welcome h1 { margin: 17px 0 9px; font-size: 28px; }
-    .welcome p { margin: 0; color: var(--muted); line-height: 1.75; }
-    .suggestions { display: grid; max-width: 620px; grid-template-columns: repeat(3, 1fr); gap: 9px; margin: 24px auto 0; }
-    .suggestion { min-height: 48px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; color: #d2d4da; background: #26272b; font-size: 12px; text-align: left; line-height: 1.4; }
-    .suggestion:hover { border-color: #596ed5; background: #2c2d32; }
+    .welcome { position: absolute; right: 0; left: 0; top: 36vh; max-width: 760px; margin: 0 auto; text-align: center; transform: translateY(-100%); }
+    .welcome-icon { width: 46px; height: 46px; border-radius: 14px; box-shadow: 0 12px 28px rgba(77, 107, 254, .2); }
+    .welcome h1 { margin: 0; font-size: 26px; font-weight: 500; line-height: 1.35; letter-spacing: -.02em; }
+    .welcome p { margin: 0; color: var(--muted); font-size: 20px; line-height: 1.75; }
+    .suggestions { display: grid; max-width: 760px; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 42px auto 0; }
+    .suggestion { min-height: 78px; padding: 18px 20px; border: 1px solid var(--line-soft); border-radius: 16px; color: #d9dbe2; background: rgba(255,255,255,.045); font-size: 15px; font-weight: 560; text-align: left; line-height: 1.45; transition: transform .16s, border-color .16s, background .16s, box-shadow .16s; }
+    .suggestion:hover { border-color: rgba(142, 160, 255, .45); background: rgba(255,255,255,.075); box-shadow: 0 10px 24px rgba(0,0,0,.14); transform: translateY(-1px); }
     .message { width: min(860px, 100%); margin: 0 auto 29px; }
     .message.user { display: flex; flex-direction: column; align-items: flex-end; }
     .bubble { overflow-wrap: anywhere; }
     .user .bubble { max-width: 78%; padding: 12px 16px; border-radius: 15px; background: #34353a; line-height: 1.65; white-space: pre-wrap; }
     .assistant .bubble { width: 100%; color: #e6e7eb; font-size: 15px; line-height: 1.82; }
     .assistant .bubble.streaming-text { white-space: pre-wrap; }
+    .assistant .bubble.empty { display: none; }
     .thinking { color: var(--muted); }
     .thinking::before { display: inline-block; margin-right: 9px; color: #8ca0ff; content: "✣"; animation: spin 1.4s linear infinite; }
+    .agent-progress { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 15px; line-height: 1.7; }
+    .agent-progress::before { display: inline-block; flex: 0 0 auto; color: #8ca0ff; content: "✣"; animation: spin 1.4s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .message-actions { margin-top: 8px; opacity: .65; }
     .copy-btn { display: grid; width: 32px; height: 32px; padding: 0; place-items: center; border: 0; border-radius: 7px; color: var(--muted); background: transparent; }
     .copy-btn svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
     .copy-btn:hover { color: var(--text); background: #2c2d31; }
-    .jump-bottom { position: absolute; right: 25px; bottom: 17px; display: none; width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 50%; background: #2d2e33; box-shadow: 0 5px 18px rgba(0,0,0,.3); }
-    .jump-bottom.visible { display: block; }
+    .jump-bottom { position: fixed; z-index: 8; left: calc(238px + (100vw - 238px) / 2); bottom: 118px; display: none; width: 42px; height: 42px; border: 1px solid rgba(255,255,255,.13); border-radius: 50%; color: var(--text); background: rgba(45,46,51,.72); box-shadow: 0 10px 30px rgba(0,0,0,.18); backdrop-filter: blur(14px); transform: translateX(-50%); }
+    .jump-bottom.visible { display: grid; place-items: center; }
+    .jump-bottom:hover { background: rgba(60,61,67,.86); }
 
     .markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 { margin: 1.35em 0 .55em; line-height: 1.35; }
     .markdown h1 { font-size: 1.45em; } .markdown h2 { font-size: 1.26em; } .markdown h3 { font-size: 1.1em; } .markdown h4, .markdown h5, .markdown h6 { font-size: 1em; }
@@ -137,6 +139,7 @@
     .markdown tbody tr:nth-child(even) { background: rgba(255,255,255,.025); }
 
     .composer-area { flex: 0 0 auto; padding: 10px clamp(24px, 7vw, 108px) 20px; background: linear-gradient(transparent, var(--bg) 16%); }
+    .chat.welcome-mode .composer-area { position: absolute; right: 0; left: 0; top: calc(36vh + 28px); padding-top: 0; background: transparent; }
     .attachment-tray { display: none; width: 100%; gap: 10px; overflow-x: auto; padding: 12px 12px 5px 5px; }
     .attachment-tray.visible { display: flex; }
     .attachment-chip { position: relative; width: 132px; height: 132px; flex: 0 0 132px; overflow: visible; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); transition: border-color .16s, box-shadow .16s, transform .16s; }
@@ -152,6 +155,11 @@
     .attachment-error { display: none; width: min(940px, 100%); margin: 0 auto 7px; color: var(--red); font-size: 11px; }
     .attachment-error.visible { display: block; }
     .composer { display: flex; width: min(940px, 100%); min-height: 72px; flex-direction: column; align-items: stretch; gap: 5px; margin: auto; padding: 8px 10px 8px 13px; border: 1px solid #45474e; border-radius: 32px; background: var(--surface); box-shadow: 0 10px 30px rgba(0,0,0,.2); }
+    .chat.welcome-mode .composer { width: min(760px, 100%); min-height: 52px; padding: 6px 8px 6px 12px; border-radius: 28px; }
+    .chat.welcome-mode .composer-controls { min-height: 46px; }
+    .chat.welcome-mode textarea { min-height: 34px; padding-top: 7px; padding-bottom: 7px; }
+    .chat.welcome-mode .icon-btn { width: 38px; height: 38px; }
+    .chat.welcome-mode .send { width: 42px; height: 42px; }
     .composer-controls { display: flex; width: 100%; min-height: 54px; align-items: center; gap: 6px; }
     textarea { flex: 1; min-width: 0; min-height: 42px; max-height: 130px; overflow-y: auto; resize: none; padding: 10px 8px; border: 0; outline: 0; color: var(--text); background: transparent; scrollbar-width: none; font-size: 16px; line-height: 1.4; }
     textarea::-webkit-scrollbar { display: none; }
@@ -164,7 +172,6 @@
     .send svg { width: 25px; height: 25px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
     .send:hover:not(:disabled) { transform: scale(1.03); }
     .send:disabled { cursor: not-allowed; opacity: .4; }
-    .hint { margin-top: 7px; color: #767983; font-size: 11px; text-align: center; }
 
     .modal-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; padding: 20px; place-items: center; background: rgba(0,0,0,.5); opacity: 0; pointer-events: none; transition: opacity .16s; }
     .modal-backdrop.visible { opacity: 1; pointer-events: auto; }
@@ -182,11 +189,15 @@
     .modal-button:disabled { cursor: not-allowed; opacity: .55; }
 
     :root[data-theme="light"] ::-webkit-scrollbar-thumb { background: #c8cbd1; }
+    :root[data-theme="light"] .history { border-right-color: #e5e5e5; }
     :root[data-theme="light"] .session-row { color: #4f535b; }
-    :root[data-theme="light"] .session-row:hover { background: #eceef2; }
-    :root[data-theme="light"] .session-row.active { color: #202124; }
-    :root[data-theme="light"] .suggestion { border-color: #e1e4ea; color: #575e6b; background: #fff; }
-    :root[data-theme="light"] .suggestion:hover { border-color: #aab6f6; color: #3449af; background: #f7f8ff; box-shadow: 0 5px 15px rgba(49,72,175,.08); }
+    :root[data-theme="light"] .session-row:hover { background: #f1f1f1; }
+    :root[data-theme="light"] .session-row.active { color: #202124; background: #ececec; }
+    :root[data-theme="light"] .new-chat { background: transparent; box-shadow: none; }
+    :root[data-theme="light"] .new-chat:hover { background: #ececec; box-shadow: 0 1px 2px rgba(32,33,36,.08); }
+    :root[data-theme="light"] .new-chat-plus { background: transparent; color: #2f3338; }
+    :root[data-theme="light"] .suggestion { border-color: #dde1e8; color: #4f5663; background: #fff; box-shadow: 0 1px 2px rgba(32,33,36,.03); }
+    :root[data-theme="light"] .suggestion:hover { border-color: #c9d1ee; color: #202124; background: #fafbff; box-shadow: 0 8px 22px rgba(49,72,175,.08); }
     :root[data-theme="light"] .composer { border-color: transparent; background: #fff; box-shadow: 0 8px 28px rgba(32,33,36,.13), 0 0 0 1px rgba(32,33,36,.06); }
     :root[data-theme="light"] .send { color: #fff; background: #111; }
     :root[data-theme="light"] .icon-btn { color: #17181b; }
@@ -198,10 +209,13 @@
     :root[data-theme="light"] .markdown th { color: #24262a; background: #f1f3f6; }
     :root[data-theme="light"] .markdown tbody tr:nth-child(even) { background: #fafbfc; }
     :root[data-theme="light"] .copy-btn:hover, :root[data-theme="light"] .icon-btn:hover { background: #eceef2; }
-    :root[data-theme="light"] .jump-bottom { background: #fff; }
+    :root[data-theme="light"] .jump-bottom { border-color: rgba(0,0,0,.08); color: #24262a; background: rgba(255,255,255,.78); box-shadow: 0 10px 28px rgba(0,0,0,.12); }
+    :root[data-theme="light"] .jump-bottom:hover { background: rgba(255,255,255,.94); }
 
-    @media (max-width: 1120px) { .app { grid-template-columns: 220px minmax(480px, 1fr); } .app.drawer-closed { grid-template-columns: 0 minmax(480px, 1fr); } .chat.welcome-mode .topbar { right: 0; left: 220px; } .drawer-closed .chat.welcome-mode .topbar { left: 0; } }
-    @media (max-width: 760px) { .app, .app.drawer-closed { display: block; } .history { position: fixed; z-index: 20; top: 0; bottom: 0; left: 0; width: 250px; height: 100vh; box-shadow: 12px 0 30px rgba(0,0,0,.25); } .drawer-closed .history { transform: translateX(-100%); } .chat { height: 100vh; } .chat.welcome-mode .topbar { right: 0; left: 0; } .suggestions { grid-template-columns: 1fr; } .composer { min-height: 64px; padding-left: 8px; } .send { width: 46px; height: 46px; } }
+    @media (max-width: 1120px) { .app { grid-template-columns: 220px minmax(480px, 1fr); } .app.drawer-closed { grid-template-columns: 0 minmax(480px, 1fr); } }
+    .drawer-closed .jump-bottom { left: 50%; }
+    @media (max-width: 1120px) { .jump-bottom { left: calc(220px + (100vw - 220px) / 2); } .drawer-closed .jump-bottom { left: 50%; } }
+    @media (max-width: 760px) { .app, .app.drawer-closed { display: block; } .history { position: fixed; z-index: 20; top: 0; bottom: 0; left: 0; width: 250px; height: 100vh; box-shadow: 12px 0 30px rgba(0,0,0,.25); } .drawer-closed .history { transform: translateX(-100%); } .chat { height: 100vh; } .suggestions { grid-template-columns: 1fr; } .composer { min-height: 64px; padding-left: 8px; } .send { width: 46px; height: 46px; } .jump-bottom, .drawer-closed .jump-bottom { left: 50%; bottom: 104px; } }
   </style>
 </head>
 <body>
@@ -209,25 +223,21 @@
     <aside class="history">
       <div class="history-head">
         <div class="brand">
-          <span class="brand-name"><span class="brand-symbol">✣</span><span>GameRover</span></span>
-          <button class="topbar-icon" id="drawerToggle" type="button" title="收起历史会话" aria-label="收起历史会话"></button>
+          <span class="brand-name"><img class="brand-icon" src="/favicon.svg" alt=""><span>GameRover</span></span>
+          <span class="brand-actions">
+            <button class="topbar-icon" id="themeToggle" type="button" title="切换明暗主题" aria-label="切换明暗主题"></button>
+            <button class="topbar-icon" id="drawerToggle" type="button" title="收起历史会话" aria-label="收起历史会话"></button>
+          </span>
         </div>
-        <button class="new-chat" id="newSession" type="button">＋ 开启新对话</button>
+        <button class="new-chat" id="newSession" type="button"><span class="new-chat-plus">＋</span><span>开启新对话</span></button>
       </div>
       <div class="history-label">历史会话</div>
       <div class="session-list" id="sessionList"><div class="history-empty">正在加载历史会话…</div></div>
     </aside>
 
+    <button class="topbar-icon drawer-reopen" id="drawerReopen" type="button" title="展开历史会话" aria-label="展开历史会话"></button>
+
     <section class="chat">
-      <header class="topbar">
-        <div class="topbar-left">
-          <button class="topbar-icon drawer-reopen" id="drawerReopen" type="button" title="展开历史会话" aria-label="展开历史会话"></button>
-          <div class="topbar-title" id="conversationTitle">新对话</div>
-        </div>
-        <div class="topbar-actions">
-          <button class="topbar-icon" id="themeToggle" type="button" title="切换明暗主题" aria-label="切换明暗主题"></button>
-        </div>
-      </header>
       <div class="messages-wrap">
         <div class="messages" id="messages"></div>
         <button class="jump-bottom" id="jumpBottom" type="button" title="回到底部">↓</button>
@@ -243,7 +253,6 @@
             <button class="send" id="sendButton" type="submit" title="发送" aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" stroke-width="2.1"></path></svg></button>
           </div>
         </form>
-        <div class="hint">Enter 发送 · Harness 自动管理工具循环与上下文压缩</div>
       </div>
     </section>
 
@@ -314,6 +323,7 @@
 
     function createSessionId() { return `game-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`; }
     function saveCurrentSession() { localStorage.setItem('gamerover-session-id', currentSessionId); }
+    function setConversationTitle(title) { if (conversationTitle) conversationTitle.textContent = title; }
     function escapeHtml(value) { return String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char])); }
     function formatDuration(milliseconds) {
       const value = Math.max(0, Number(milliseconds) || 0);
@@ -326,8 +336,9 @@
       return DOMPurify.sanitize(rawHtml, {ADD_ATTR: ['target', 'rel']});
     }
     function welcomeMarkup() {
-      return `<div class="welcome"><div class="welcome-symbol">✣</div><h1>我是 GameRover</h1><p>可以查询玩法、角色、任务与版本资讯。</p><div class="suggestions"><button class="suggestion" data-prompt="艾尔登法环的新手开荒路线怎么规划？">艾尔登法环开荒建议</button><button class="suggestion" data-prompt="绝区零最近有什么版本更新？">绝区零最新资讯</button><button class="suggestion" data-prompt="我在明日方舟卡关了，有点烦，陪我聊聊。">聊聊游戏挫败</button></div></div>`;
+      return `<div class="welcome"><h1>你好，我准备好了～</h1></div>`;
     }
+    function showChat() { document.querySelector('.chat').classList.remove('welcome-mode'); }
     function showWelcome() { document.querySelector('.chat').classList.add('welcome-mode'); messages.innerHTML = welcomeMarkup(); bindSuggestions(); }
     function bindSuggestions() { document.querySelectorAll('[data-prompt]').forEach(button => button.addEventListener('click', () => send(button.dataset.prompt))); }
     function scrollToBottom(force = false) {
@@ -361,7 +372,7 @@
       finally { attachmentInput.value = ''; }
     }
     function addMessage(role, text, temporary = false, attachments = []) {
-      document.querySelector('.chat').classList.remove('welcome-mode');
+      showChat();
       messages.querySelector('.welcome')?.remove();
       const row = document.createElement('div'); row.className = `message ${role}`;
       const bubble = document.createElement('div'); bubble.className = `bubble${temporary ? ' thinking' : ''}`;
@@ -413,7 +424,7 @@
         const response = await fetch(`/ai/sessions/${encodeURIComponent(session.session_id)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title})});
         const data = await response.json();
         if (!response.ok) { window.alert(data.detail || '重命名失败'); renderSessionList(); return; }
-        session.title = data.title; if (session.session_id === currentSessionId) conversationTitle.textContent = data.title; renderSessionList();
+        session.title = data.title; if (session.session_id === currentSessionId) setConversationTitle(data.title); renderSessionList();
       };
       input.addEventListener('click', event => event.stopPropagation());
       input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); save(); } else if (event.key === 'Escape') { event.preventDefault(); cancelled = true; renderSessionList(); } });
@@ -432,16 +443,17 @@
       const response = await fetch(`/ai/sessions/${encodeURIComponent(session.session_id)}`, {method: 'DELETE'});
       if (!response.ok) { const data = await response.json(); deleteModalError.textContent = data.detail || '删除失败'; confirmDeleteButton.disabled = false; confirmDeleteButton.textContent = '删除'; return; }
       sessions = sessions.filter(item => item.session_id !== session.session_id);
-      if (session.session_id === currentSessionId) { currentSessionId = createSessionId(); saveCurrentSession(); conversationTitle.textContent = '新对话'; showWelcome(); }
+      if (session.session_id === currentSessionId) { currentSessionId = createSessionId(); saveCurrentSession(); setConversationTitle('新对话'); showWelcome(); }
       closeDeleteModal();
       renderSessionList();
     }
     async function loadSessions() {
       const response = await fetch('/ai/sessions'); const data = await response.json(); sessions = data.sessions || []; renderSessionList();
-      const active = sessions.find(item => item.session_id === currentSessionId); if (active) await openSession(active.session_id, active.title); else { conversationTitle.textContent = '新对话'; showWelcome(); }
+      const active = sessions.find(item => item.session_id === currentSessionId); if (active) await openSession(active.session_id, active.title); else { setConversationTitle('新对话'); showWelcome(); }
     }
     async function openSession(sessionId, title) {
-      if (busy) return; currentSessionId = sessionId; saveCurrentSession(); conversationTitle.textContent = title || '历史对话'; renderSessionList();
+      if (busy) return; currentSessionId = sessionId; saveCurrentSession(); setConversationTitle(title || '历史对话'); renderSessionList();
+      showChat();
       if (window.matchMedia('(max-width: 760px)').matches) { drawerClosed = true; applyDrawerState(); }
       try {
         const historyResponse = await fetch(`/ai/sessions/${encodeURIComponent(sessionId)}/messages`);
@@ -464,16 +476,21 @@
       attachmentInput.value = '';
       renderAttachmentTray();
       showAttachmentError();
-      const loading = addMessage('assistant', '正在启动 Agent Harness…', true); const loadingBubble = loading.querySelector('.bubble'); question.value = ''; question.style.height = 'auto';
+      const loading = addMessage('assistant', '', true); const loadingBubble = loading.querySelector('.bubble'); loadingBubble.classList.add('empty');
+      const statusLine = document.createElement('div'); statusLine.className = 'agent-progress'; statusLine.textContent = '等待 Harness 开始执行…'; loading.append(statusLine);
+      question.value = ''; question.style.height = 'auto';
       try {
         const response = await fetch('/ai/chat/stream', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: text.trim(), session_id: currentSessionId, attachments: outgoingAttachments})});
         if (!response.ok || !response.body) throw new Error('无法建立流式连接');
         const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let finalData = null; let streamed = '';
+        const formatMs = ms => ms == null ? '' : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+        const setStatus = text => { statusLine.hidden = false; statusLine.textContent = text; };
+        const hideStatus = () => { statusLine.hidden = true; };
         let streamRenderFrame = null;
         const flushStreamRender = () => {
           if (streamRenderFrame) { cancelAnimationFrame(streamRenderFrame); streamRenderFrame = null; }
           if (!streamed) return;
-          loadingBubble.classList.remove('thinking', 'streaming-text');
+          loadingBubble.classList.remove('thinking', 'streaming-text', 'empty');
           loadingBubble.classList.add('markdown');
           loadingBubble.innerHTML = renderMarkdown(streamed);
           scrollToBottom();
@@ -488,9 +505,11 @@
           for (const block of blocks) {
             if (!block.trim()) continue;
             const packet = parseSseBlock(block);
-            if (packet.event === 'token') { streamed += packet.data.content || ''; scheduleStreamRender(); }
-            else if (packet.event === 'tool_started' && !streamed) { loadingBubble.textContent = `正在执行工具：${packet.data.name || 'unknown'}…`; }
-            else if (packet.event === 'tool_completed' && !streamed) { loadingBubble.textContent = `工具执行完成，正在整理回答…`; }
+            if (packet.event === 'token') { streamed += packet.data.content || ''; hideStatus(); scheduleStreamRender(); }
+            else if (packet.event === 'model_started') { setStatus('正在调用模型思考…'); }
+            else if (packet.event === 'model_completed' && !streamed) { setStatus(`模型调用完成（${formatMs(packet.data.elapsed_ms)}），正在判断下一步…`); }
+            else if (packet.event === 'tool_started') { setStatus(`正在执行工具：${packet.data.name || 'unknown'}…`); }
+            else if (packet.event === 'tool_completed') { setStatus(`工具执行完成：${packet.data.name || 'unknown'}（${formatMs(packet.data.elapsed_ms)}），正在整理回答…`); }
             else if (packet.event === 'final') finalData = packet.data;
             else if (packet.event === 'error') throw new Error(packet.data.detail);
           }
@@ -502,7 +521,7 @@
       } catch (error) { loading.remove(); addMessage('assistant', `请求失败：${error.message}`); }
       finally { busy = false; sendButton.disabled = false; question.focus(); }
     }
-    async function refreshSessionsOnly() { const response = await fetch('/ai/sessions'); sessions = (await response.json()).sessions || []; const active = sessions.find(item => item.session_id === currentSessionId); if (active) conversationTitle.textContent = active.title; renderSessionList(); }
+    async function refreshSessionsOnly() { const response = await fetch('/ai/sessions'); sessions = (await response.json()).sessions || []; const active = sessions.find(item => item.session_id === currentSessionId); if (active) setConversationTitle(active.title); renderSessionList(); }
 
     messages.addEventListener('scroll', () => { const away = messages.scrollHeight - messages.scrollTop - messages.clientHeight > 220; jumpBottom.classList.toggle('visible', away); });
     jumpBottom.addEventListener('click', () => scrollToBottom(true));
@@ -519,7 +538,7 @@
     question.addEventListener('input', () => { question.style.height = 'auto'; question.style.height = `${Math.min(question.scrollHeight, 150)}px`; });
     attachmentButton.addEventListener('click', () => attachmentInput.click());
     attachmentInput.addEventListener('change', () => addSelectedAttachments(attachmentInput.files));
-    document.querySelector('#newSession').addEventListener('click', () => { if (busy) return; currentSessionId = createSessionId(); saveCurrentSession(); conversationTitle.textContent = '新对话'; renderSessionList(); showWelcome(); if (window.matchMedia('(max-width: 760px)').matches) { drawerClosed = true; applyDrawerState(); } });
+    document.querySelector('#newSession').addEventListener('click', () => { if (busy) return; currentSessionId = createSessionId(); saveCurrentSession(); setConversationTitle('新对话'); renderSessionList(); showWelcome(); if (window.matchMedia('(max-width: 760px)').matches) { drawerClosed = true; applyDrawerState(); } });
     loadSessions().catch(error => { sessionList.innerHTML = `<div class="history-empty">加载失败：${escapeHtml(error.message)}</div>`; showWelcome(); });
   </script>
 </body>

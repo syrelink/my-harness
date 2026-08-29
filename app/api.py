@@ -24,6 +24,8 @@ from app.game_agent.models import (
 )
 from app.game_agent.stream import (
     AgentStreamEvent,
+    ModelCompleted,
+    ModelStarted,
     TextDelta,
     ToolCompleted,
     ToolStarted,
@@ -68,10 +70,14 @@ def event_to_sse(event: AgentStreamEvent) -> str | None:
     """把 Harness 内部事件映射成前端稳定消费的 SSE 事件。"""
     if isinstance(event, TextDelta):
         return sse("token", {"content": event.content})
+    if isinstance(event, ModelStarted):
+        return sse("model_started", {})
+    if isinstance(event, ModelCompleted):
+        return sse("model_completed", {"elapsed_ms": event.elapsed_ms})
     if isinstance(event, ToolStarted):
         return sse("tool_started", {"name": event.name})
     if isinstance(event, ToolCompleted):
-        return sse("tool_completed", {"name": event.name})
+        return sse("tool_completed", {"name": event.name, "elapsed_ms": event.elapsed_ms})
     if isinstance(event, TurnCompleted):
         return sse("final", {"answer": event.answer})
     if isinstance(event, TurnError):

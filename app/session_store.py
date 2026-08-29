@@ -21,7 +21,7 @@ from app.game_agent.models import AttachmentInput
 
 
 class SessionStore:
-    """保存完整 Transcript 和可压缩的 Agent State；图片原文交给 MinIO。"""
+    """保存完整 Transcript 和可压缩的 Agent State,图片原文交给 MinIO。"""
 
     def __init__(
         self,
