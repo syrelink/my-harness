@@ -13,8 +13,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 import os
 import time
 from collections.abc import AsyncIterator
@@ -29,7 +27,7 @@ from app.game_agent.memory import (
     ContextBudget,
     ContextManager,
 )
-from app.game_agent.observability import langfuse_handler, observe
+from app.game_agent.observability import langfuse_handler, observe, update_current_span
 from app.game_agent.prompts import build_agent_system_prompt
 from app.game_agent.skills import SkillRegistry
 from app.game_agent.stream import (
@@ -41,7 +39,8 @@ from app.game_agent.stream import (
     ToolStarted,
     TurnCompleted,
 )
-from app.game_agent.tools import AGENT_TOOLS, skill_registry
+from app.game_agent.tools import skill_registry, tool_registry
+from app.runtime.toolruntime import ToolRegistry
 
 
 def create_model(prefix: str = "GAME_ASSISTANT") -> ChatOpenAI:
@@ -65,7 +64,7 @@ class AgentHarness:
     def __init__(
         self,
         model: BaseChatModel,
-        tools: list,
+        tool_registry: ToolRegistry,
         context_manager: ContextManager,
         skill_registry: SkillRegistry,
         session_store,
@@ -74,29 +73,21 @@ class AgentHarness:
         """注入 Agent 运行所需依赖，并提前准备模型工具协议。
 
         - ``model``：真正负责推理和生成的聊天模型；
-        - ``tools``：模型可以请求调用的工具列表；
+        - ``tool_registry``：模型工具及其超时、并发和输出策略；
         - ``context_manager``：Token 测压、历史压缩和模型上下文组装；
         - ``skill_registry``：启动时扫描到的 Skill 目录；
         - ``session_store``：PostgreSQL 会话状态；
         - ``attachment_loader``：按引用从 MinIO 临时读取当前图片。
         """
         self.model = model
-        # 字典让工具执行阶段可以用模型返回的 name 快速找到对应工具。
-        self.tools = {tool.name: tool for tool in tools}
-        # 调度策略属于宿主，不写进模型 Tool Schema。未知或未声明的工具默认串行。
-        self.parallel_tools = {
-            tool.name
-            for tool in tools
-            if (tool.metadata or {}).get("execution_mode") == "parallel"
-        }
-        # bind_tools 只把工具 Schema 告诉模型；此时不会执行任何工具。
-        self.model_with_tools = model.bind_tools(tools)
+        self.tool_registry = tool_registry
+        # bind_tools 只把工具 Schema 告诉模型；运行策略仍由 ToolRegistry 保管。
+        self.model_with_tools = model.bind_tools(tool_registry.model_tools())
         self.context_manager = context_manager
         self.skill_registry = skill_registry
         self.session_store = session_store
         self.attachment_loader = attachment_loader
         self.agent_system_prompt = build_agent_system_prompt(skill_registry.catalog_prompt())
-        self.default_timeout = float(os.getenv("GAME_TOOL_TIMEOUT_SECONDS", "35"))
         self.max_parallel_tools = max(1, int(os.getenv("GAME_MAX_PARALLEL_TOOLS", "4")))
 
     # ---------- 会话状态 ----------
@@ -157,12 +148,14 @@ class AgentHarness:
         """
         # —— 持久层：从 DB 读会话状态（只含跨轮字段） ——
         state = await self.load_state(session_id)
+        step = 0
         state["active_messages"] = list(state.get("active_messages", [])) + [user_message]
         state["turn_count"] = int(state.get("turn_count", 0)) + 1
 
         last_response = AIMessage(content="")
 
         while True:
+            step += 1
             # 一次循环代表一次“模型决策步”：测压 → 调模型 →（可能）执行工具。
             # 每次调用模型前测压，超阈值才压缩。
             compaction_result = await self.context_manager.compact(
@@ -186,7 +179,8 @@ class AgentHarness:
                 response = chunk if response is None else response + chunk
                 if isinstance(chunk.content, str) and chunk.content:
                     yield TextDelta(chunk.content)
-            yield ModelCompleted(int((time.perf_counter() - model_started_at) * 1000))
+            model_elapsed_ms = int((time.perf_counter() - model_started_at) * 1000)
+            yield ModelCompleted(model_elapsed_ms)
             response = response or AIMessage(content="")
             if not response.id:
                 response.id = str(uuid4())
@@ -200,14 +194,18 @@ class AgentHarness:
             # ToolExecution：手动执行本批工具。工具调用 JSON 不直接给前端，只发稳定状态事件。
             for call in response.tool_calls:
                 yield ToolStarted(call.get("name", "unknown"))
-            tool_started_at = time.perf_counter()
-            tool_messages = await self._execute_tools(response)
-            tool_elapsed_ms = int((time.perf_counter() - tool_started_at) * 1000)
+            tool_results = await self._execute_tools(
+                response,
+                step=step,
+            )
             for call in response.tool_calls:
-                yield ToolCompleted(call.get("name", "unknown"), elapsed_ms=tool_elapsed_ms)
-            state["active_messages"] = list(state["active_messages"]) + tool_messages
+                yield ToolCompleted(call.get("name", "unknown"))
+            state["active_messages"] = list(state["active_messages"]) + tool_results
 
         await self.save_state(session_id, state)
+        update_current_span(
+            output={"status": "completed", "steps": step}
+        )
         yield TurnCompleted(last_response.text)
 
     # ---------- 模型调用 ----------
@@ -240,74 +238,25 @@ class AgentHarness:
             yield chunk
 
     # ---------- 工具执行 ----------
-    # 当前 Observation 代表“一批工具调用”。如果未来需要按工具聚合指标，可以进一步把
-    # 单次工具调用抽成一个带 @observe(as_type="tool") 的函数。
+    # 当前 Observation 代表“一批工具调用”；ToolRegistry.execute 会为每个工具再创建
+    # 一个 tool 类型的子 Observation，便于区分批次总耗时和单工具耗时。
     @observe(name="tool_execution")
-    async def _execute_tools(self, response: AIMessage):
+    async def _execute_tools(
+        self,
+        response: AIMessage,
+        *,
+        step: int,
+    ) -> list[ToolMessage]:
         """并行执行一批只读工具，并按模型原始调用顺序返回 ToolMessage。
 
         ToolMessage 会放回消息历史供下一次模型读取。单个工具具有超时和异常降级，
-        失败会转成结构化 ToolMessage，而不是直接打断整轮。只要本批包含未声明为
-        parallel 的工具，就保守地整批串行；当前 read_skill/web_search 都是只读工具。
+        失败会转成结构化 ToolMessage，而不是直接打断整轮。连续的 parallel 工具
+        成组并发，serial 工具会等待前一组完成后独占执行。
         """
-        calls = response.tool_calls
-        can_run_in_parallel = all(
-            call.get("name") in self.parallel_tools for call in calls
-        )
-        if not can_run_in_parallel:
-            return [await self._execute_one_tool(call) for call in calls]
-
-        semaphore = asyncio.Semaphore(self.max_parallel_tools)
-
-        async def execute_limited(call: dict) -> ToolMessage:
-            async with semaphore:
-                return await self._execute_one_tool(call)
-
-        # gather 允许执行乱序完成，但返回值严格保持 calls 的原始顺序。
-        return await asyncio.gather(*(execute_limited(call) for call in calls))
-
-    async def _execute_one_tool(self, call: dict) -> ToolMessage:
-        """执行一个工具调用，并把成功、超时或异常统一转换为 ToolMessage。"""
-        name = call.get("name", "unknown")
-        args = call.get("args", {})
-        tool = self.tools.get(name)
-        if tool is None:
-            content = json.dumps({
-                "error": f"未知工具：{name}",
-                "error_type": "unknown_tool",
-                "tool": name,
-            }, ensure_ascii=False)
-            status = "error"
-        else:
-            try:
-                result = await asyncio.wait_for(
-                    tool.ainvoke(args), timeout=self.default_timeout
-                )
-                content = result if isinstance(result, str) else json.dumps(
-                    result, ensure_ascii=False, default=str
-                )
-                status = "success"
-            except asyncio.TimeoutError:
-                content = json.dumps({
-                    "error": f"{name} 执行超时",
-                    "error_type": "tool_timeout",
-                    "tool": name,
-                }, ensure_ascii=False)
-                status = "error"
-            except Exception as exc:
-                content = json.dumps({
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "tool": name,
-                }, ensure_ascii=False)
-                status = "error"
-
-        return ToolMessage(
-            content=content,
-            tool_call_id=call.get("id", ""),
-            name=name,
-            status="error" if status == "error" else "success",
-            id=str(uuid4()),
+        return await self.tool_registry.execute_many(
+            response.tool_calls,
+            step=step,
+            max_parallel_tools=self.max_parallel_tools,
         )
 
 def build_harness(session_store, attachment_loader: AttachmentLoader | None = None) -> AgentHarness:
@@ -322,7 +271,7 @@ def build_harness(session_store, attachment_loader: AttachmentLoader | None = No
     context_manager = ContextManager(model, budget)
     return AgentHarness(
         model=model,
-        tools=AGENT_TOOLS,
+        tool_registry=tool_registry,
         context_manager=context_manager,
         skill_registry=skill_registry,
         session_store=session_store,

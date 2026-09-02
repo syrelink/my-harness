@@ -5,7 +5,8 @@ main.py 只负责三件事：
 2. 初始化共享运行时依赖；
 3. 创建 FastAPI app 并挂载 API 路由。
 
-HTTP 路由和 SSE 协议转换在 ``app/api.py``，Agent 主循环在 ``app/game_agent/agent.py``。
+HTTP 路由和 SSE 协议转换在 ``app/api/routes.py``，Agent 主循环在
+``app/game_agent/agent.py``。
 """
 
 from __future__ import annotations
@@ -19,10 +20,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import router
-from app.attachment_store import MinioAttachmentStore
-from app.game_agent import build_harness
-from app.session_store import SessionStore
+from app.api.routes import router
+from app.game_agent.agent import build_harness
+from app.runtime.runmanager import RunManager
+from app.storage.attachmentstore import MinioAttachmentStore
+from app.storage.sessionstore import SessionStore
 
 
 load_dotenv()
@@ -47,11 +49,13 @@ async def lifespan(app: FastAPI):
         session_store,
         attachment_loader=session_store.get_attachment,
     )
+    app.state.run_manager = RunManager(app.state.harness, session_store)
     logging.info("Game_Rover Agent Harness 已启动")
 
     try:
         yield
     finally:
+        await app.state.run_manager.close()
         await session_store.close()
 
 

@@ -11,7 +11,7 @@ from langchain_core.messages import messages_from_dict, messages_to_dict
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from app.attachment_store import (
+from app.storage.attachmentstore import (
     AttachmentObjectStore,
     attachment_object_key,
     attachment_prefix,

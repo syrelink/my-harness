@@ -15,6 +15,7 @@ from langchain.tools import tool
 
 from app.game_agent.search import DuckDuckGoSearch
 from app.game_agent.skills import SkillRegistry
+from app.runtime.toolruntime import ToolRegistry
 
 
 skill_registry = SkillRegistry(
@@ -30,8 +31,8 @@ def read_skill(name: str, paths: list[str]) -> str:
     normalized_paths = list(dict.fromkeys(path.strip() for path in paths if path.strip()))
     if not normalized_paths or len(normalized_paths) > 5:
         return json.dumps({
-            "error": "paths 必须包含 1 至 5 个不重复路径",
-            "error_type": "ValueError",
+            "error_code": "invalid_args",
+            "message": "paths 必须包含 1 至 5 个不重复路径",
             "tool": "read_skill",
         }, ensure_ascii=False)
 
@@ -50,8 +51,8 @@ def read_skill(name: str, paths: list[str]) -> str:
         except Exception as exc:
             errors.append({
                 "path": path,
-                "error": str(exc),
-                "error_type": exc.__class__.__name__,
+                "message": str(exc),
+                "error_code": "skill_read_failed",
             })
 
     return json.dumps({
@@ -68,8 +69,8 @@ async def web_search(queries: list[str]) -> str:
     search_queries = list(dict.fromkeys(query.strip() for query in queries if query.strip()))
     if not search_queries or len(search_queries) > 4:
         return json.dumps({
-            "error": "queries 必须包含 1 至 4 个不重复查询",
-            "error_type": "ValueError",
+            "error_code": "invalid_args",
+            "message": "queries 必须包含 1 至 4 个不重复查询",
             "tool": "web_search",
         }, ensure_ascii=False)
 
@@ -79,8 +80,8 @@ async def web_search(queries: list[str]) -> str:
         except Exception as exc:
             return {
                 "query": query,
-                "error": str(exc),
-                "error_type": exc.__class__.__name__,
+                "message": str(exc),
+                "error_code": "search_failed",
             }
         return {
             "query": query,
@@ -95,9 +96,19 @@ async def web_search(queries: list[str]) -> str:
     return json.dumps({"searches": searches}, ensure_ascii=False)
 
 
-# 并发策略只供 Harness 调度器读取，不会进入模型看到的 Tool Schema。
-read_skill.metadata = {"execution_mode": "parallel"}
-web_search.metadata = {"execution_mode": "parallel"}
-
-# 只有列表中的函数会通过 model.bind_tools 暴露给主 Agent。
-AGENT_TOOLS = [read_skill, web_search]
+# 工具能力和运行策略统一注册；只有 Tool Schema 会通过 bind_tools 暴露给模型。
+tool_registry = ToolRegistry()
+tool_registry.register(
+    read_skill,
+    timeout_seconds=float(os.getenv("GAME_SKILL_TIMEOUT_SECONDS", "8")),
+    execution_mode="parallel",
+    idempotent=True,
+    max_result_chars=30_000,
+)
+tool_registry.register(
+    web_search,
+    timeout_seconds=float(os.getenv("GAME_SEARCH_TIMEOUT_SECONDS", "35")),
+    execution_mode="parallel",
+    idempotent=True,
+    max_result_chars=20_000,
+)

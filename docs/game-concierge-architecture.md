@@ -35,7 +35,7 @@ while True:
 - `search.py`：最小化 DuckDuckGo 网页搜索。
 - `multimodal.py`：图片引用协议与模型调用前的临时 Hydration。
 - `observability.py`：Langfuse `@observe` 与 LangChain CallbackHandler 接入。
-- `session_store.py`：会话、Transcript、附件元数据与 Agent State 的持久化。
+- `sessionstore.py`：会话、Transcript、附件元数据与 Agent State 的持久化。
 - `main.py`：FastAPI 接口与 SSE 流式输出。
 
 ## 持久化（状态与日志分离）
@@ -53,7 +53,7 @@ summary_version     # 摘要版本号
 
 当前图片只存在于本轮，不进入持久状态；模型 Usage 和调用链由 Langfuse 记录。
 
-`session_store.py` 在 Postgres 中维护：
+`sessionstore.py` 在 Postgres 中维护：
 
 ```text
 chat_sessions       # 会话列表

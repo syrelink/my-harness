@@ -24,9 +24,10 @@
     ├── model_call
     │   └── ChatOpenAI generation
     └── tool_execution
+        └── tool:web_search / tool:read_skill
 
-其中前两层来自 ``@observe``，最内层的模型 Generation 来自 LangChain
-``CallbackHandler``。
+Agent、模型边界和工具边界来自 ``@observe``，模型 Generation 来自 LangChain
+``CallbackHandler``；单工具 Observation 只记录状态和耗时，不上传工具参数与原始结果。
 
 使用方式：
 - 用 @observe() 装饰 Agent 方法，自动生成 Trace / Span；
@@ -42,7 +43,7 @@ from __future__ import annotations
 import os
 
 from dotenv import load_dotenv
-from langfuse import observe
+from langfuse import get_client, observe
 from langfuse.langchain import CallbackHandler
 
 # 必须在读取环境变量之前加载 .env：main.py 的 load_dotenv() 在 import 之后才执行，
@@ -57,3 +58,11 @@ _CONFIGURED = bool(_PUBLIC_KEY and _SECRET_KEY)
 # 不挂载 CallbackHandler；@observe 仍可保留在业务代码中，由 Langfuse SDK 自行判断
 # 是否存在可用的导出客户端。
 langfuse_handler = CallbackHandler() if _CONFIGURED else None
+
+
+def update_current_span(**kwargs) -> None:
+    """配置 Langfuse 时更新当前 Observation；未配置时保持业务代码无副作用。"""
+
+    if not _CONFIGURED:
+        return
+    get_client().update_current_span(**kwargs)

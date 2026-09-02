@@ -1,13 +1,12 @@
 """HTTP API 层：把外部请求转换为 Agent Harness 调用。
 
 这个文件只处理 FastAPI 路由、SSE 编码、请求/响应适配；真正的 Agent 循环在
-``game_agent/agent.py``，数据库和附件存储在 ``session_store.py``。
+``game_agent/agent.py``，数据库和附件存储在 ``storage/``。
 """
 
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import uuid4
@@ -32,10 +31,11 @@ from app.game_agent.stream import (
     TurnCompleted,
     TurnError,
 )
+from app.runtime.runmanager import RunAlreadyActive, RunCancelledEvent, RunSnapshotEvent
 
 
 router = APIRouter()
-WEB_DIR = Path(__file__).parent / "web"
+WEB_DIR = Path(__file__).parents[1] / "web"
 
 
 def sse(event: str, data: dict) -> str:
@@ -44,13 +44,13 @@ def sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
-async def prepare_turn(request: Request, req: ChatRequest) -> HumanMessage:
+async def prepare_turn(store, req: ChatRequest) -> HumanMessage:
     """保存用户消息和附件，返回 Agent 本轮需要的 HumanMessage。
 
     持久消息只保存文本和图片引用；图片原文已在 record_user_message() 中写入 MinIO。
     模型调用前，Harness 会再把最新消息里的 type="image" 引用临时转成 image_url。
     """
-    stored_attachments = await request.app.state.session_store.record_user_message(
+    stored_attachments = await store.record_user_message(
         req.session_id,
         req.question,
         req.attachments,
@@ -66,8 +66,14 @@ async def prepare_turn(request: Request, req: ChatRequest) -> HumanMessage:
     return HumanMessage(content=content, id=str(uuid4()))
 
 
-def event_to_sse(event: AgentStreamEvent) -> str | None:
+def event_to_sse(
+    event: AgentStreamEvent | RunSnapshotEvent | RunCancelledEvent,
+) -> str | None:
     """把 Harness 内部事件映射成前端稳定消费的 SSE 事件。"""
+    if isinstance(event, RunSnapshotEvent):
+        return sse("run_snapshot", event.snapshot)
+    if isinstance(event, RunCancelledEvent):
+        return sse("cancelled", {"answer": event.answer})
     if isinstance(event, TextDelta):
         return sse("token", {"content": event.content})
     if isinstance(event, ModelStarted):
@@ -77,7 +83,7 @@ def event_to_sse(event: AgentStreamEvent) -> str | None:
     if isinstance(event, ToolStarted):
         return sse("tool_started", {"name": event.name})
     if isinstance(event, ToolCompleted):
-        return sse("tool_completed", {"name": event.name, "elapsed_ms": event.elapsed_ms})
+        return sse("tool_completed", {"name": event.name})
     if isinstance(event, TurnCompleted):
         return sse("final", {"answer": event.answer})
     if isinstance(event, TurnError):
@@ -102,41 +108,46 @@ async def favicon_ico():
 
 @router.post("/ai/chat", response_model=ChatResponse)
 async def chat(request: Request, req: ChatRequest) -> ChatResponse:
-    """非流式接口：消费完整 AgentEvent 流，只返回最终回答。"""
-    message = await prepare_turn(request, req)
-    answer = ""
-    async for event in request.app.state.harness.stream_turn(
-        req.session_id,
-        message,
-    ):
-        if isinstance(event, TurnCompleted):
-            answer = event.answer
-    await request.app.state.session_store.record_assistant_message(req.session_id, answer)
-    return ChatResponse(answer=answer)
+    """非流式接口：启动同一种后台 Run，等待其终态后返回。"""
+    store = request.app.state.session_store
+    try:
+        run = await request.app.state.run_manager.start(
+            req.session_id,
+            lambda: prepare_turn(store, req),
+        )
+    except RunAlreadyActive as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "active_run_id": exc.run_id},
+        ) from exc
+    result = await request.app.state.run_manager.wait(run["run_id"])
+    if not result or result["status"] != "completed":
+        raise HTTPException(status_code=500, detail=(result or {}).get("error", "任务执行失败"))
+    return ChatResponse(answer=result["final_answer"] or "")
 
 
 @router.post("/ai/chat/stream")
 async def stream_chat(request: Request, req: ChatRequest):
-    """流式接口：把 AgentEvent 转换为 SSE，供前端实时展示。"""
+    """启动后台 Run；当前 SSE 仅订阅事件，断开不会取消 Run。"""
+
+    store = request.app.state.session_store
+    manager = request.app.state.run_manager
+    try:
+        run = await manager.start(
+            req.session_id,
+            lambda: prepare_turn(store, req),
+        )
+    except RunAlreadyActive as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "active_run_id": exc.run_id},
+        ) from exc
 
     async def events() -> AsyncIterator[str]:
-        try:
-            message = await prepare_turn(request, req)
-            async for event in request.app.state.harness.stream_turn(
-                req.session_id,
-                message,
-            ):
-                if isinstance(event, TurnCompleted):
-                    await request.app.state.session_store.record_assistant_message(
-                        req.session_id,
-                        event.answer,
-                    )
-                chunk = event_to_sse(event)
-                if chunk:
-                    yield chunk
-        except Exception as exc:
-            logging.exception("Game_Rover 流式执行失败")
-            yield event_to_sse(TurnError(str(exc))) or ""
+        async for event in manager.subscribe(run["run_id"]):
+            chunk = event_to_sse(event)
+            if chunk:
+                yield chunk
 
     return StreamingResponse(
         events(),
@@ -148,6 +159,29 @@ async def stream_chat(request: Request, req: ChatRequest):
 @router.get("/ai/sessions")
 async def list_sessions(request: Request):
     return {"sessions": await request.app.state.session_store.list_sessions()}
+
+
+@router.get("/ai/runs/{run_id}")
+async def inspect_run(request: Request, run_id: str):
+    run = await request.app.state.run_manager.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+    return run
+
+
+@router.post("/ai/runs/{run_id}/cancel")
+async def cancel_run(request: Request, run_id: str):
+    """停止一个后台 Run；重复停止终态 Run 时直接返回其当前状态。"""
+    run = await request.app.state.run_manager.cancel(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run 不存在")
+    return run
+
+
+@router.get("/ai/sessions/{session_id}/active-run")
+async def active_session_run(request: Request, session_id: str):
+    """返回最近一次 Run；终态短暂保留，用于处理刷新与完成的竞态。"""
+    return {"run": await request.app.state.run_manager.get_latest(session_id)}
 
 
 @router.get("/ai/sessions/{session_id}/messages")
@@ -194,9 +228,13 @@ async def rename_session(request: Request, session_id: str, req: SessionRenameRe
 
 @router.delete("/ai/sessions/{session_id}", status_code=204)
 async def delete_session(request: Request, session_id: str):
+    run = await request.app.state.run_manager.get_latest(session_id)
+    if run and run["status"] not in {"completed", "failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="当前会话仍有任务正在执行")
     deleted = await request.app.state.session_store.delete_session(session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="session not found")
+    await request.app.state.run_manager.forget_session(session_id)
 
 
 @router.get("/ai/sessions/{session_id}/state")
