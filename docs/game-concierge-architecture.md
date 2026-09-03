@@ -32,7 +32,7 @@ while True:
 - `models.py`：ContextSummary、附件引用和 HTTP 请求/响应模型。
 - `tools.py`：批量 `read_skill` / `web_search` 两个工具。
 - `skills/`：Agent Skills 元数据、工作流、references 与安全加载器。
-- `search.py`：最小化 DuckDuckGo 网页搜索。
+- `search.py`：调用自托管 SearXNG JSON API，并统一结果字段与URL去重。
 - `multimodal.py`：图片引用协议与模型调用前的临时 Hydration。
 - `observability.py`：Langfuse `@observe` 与 LangChain CallbackHandler 接入。
 - `sessionstore.py`：会话、Transcript、附件元数据与 Agent State 的持久化。

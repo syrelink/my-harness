@@ -1,4 +1,4 @@
-"""用 Mock 依赖验证 Agent → Tool → Agent 的完整闭环。"""
+"""用 Mock 依赖验证 Agent → Tool → Agent 的 Tool Loop 闭环。"""
 
 import pytest
 from langchain.tools import tool
@@ -123,4 +123,3 @@ async def test_agent_uses_tool_result_in_second_model_call():
 
     # 最终状态包含 HumanMessage、模型工具调用、ToolMessage 和最终回答。
     assert len(store.state["active_messages"]) == 4
-

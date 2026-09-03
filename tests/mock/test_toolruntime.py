@@ -1,3 +1,5 @@
+"""用 Mock 工具验证 ToolSpec 与 ToolRegistry 的运行策略。"""
+
 import asyncio
 import json
 

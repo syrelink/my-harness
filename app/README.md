@@ -26,7 +26,7 @@ app/
 │   ├── models.py                   # API、附件和摘要的数据模型
 │   ├── stream.py                   # Agent 内部流式事件协议
 │   ├── tools.py                    # read_skill、web_search 工具注册
-│   ├── search.py                   # DuckDuckGo 搜索实现
+│   ├── search.py                   # SearXNG JSON API 适配与结果规范化
 │   ├── multimodal.py               # 图片引用与模型调用前按需加载
 │   ├── prompts.py                  # 系统提示词和压缩提示词
 │   ├── observability.py            # Langfuse 链路观测
@@ -43,6 +43,7 @@ app/
 - 修改数据库表、历史消息或附件：看 `storage/`。
 - 修改模型如何思考、调用工具或压缩上下文：看 `game_agent/`。
 - 修改页面显示和交互：看 `web/index.html`。
+- 修改搜索来源、超时和返回字段：看 `game_agent/search.py` 与 `infra/searxng/`。
 
 `main.py` 不写业务逻辑，只创建共享依赖并把各层连接起来。这样移动存储、
 运行时或前端实现时，不需要修改 Agent 主循环。
@@ -54,3 +55,4 @@ app/
 - `conftest.py`：设置所有测试共享的环境。
 - `test_runmanager.py`：验证断开 SSE 后继续执行、主动停止、单会话互斥和失败状态。
 - `test_toolruntime.py`：验证工具注册、参数校验、超时和并发策略。
+- `test_websearch.py`：验证 SearXNG 参数、结果规范化、并发和失败降级。

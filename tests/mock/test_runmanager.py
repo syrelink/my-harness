@@ -1,3 +1,5 @@
+"""用可控 Harness 和内存 Store 验证 RunManager 生命周期。"""
+
 import asyncio
 
 import pytest

@@ -1,7 +1,21 @@
 services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   postgres:
     image: postgres:17-alpine
-    container_name: gamescope-postgres
+    container_name: postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: gamescope
@@ -17,5 +31,25 @@ services:
       timeout: 3s
       retries: 20
 
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - gamescope_minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   gamescope_postgres_data:
+  gamescope_minio_data:

@@ -1,88 +1,127 @@
-"""最小可用的网页搜索。
+"""SearXNG 搜索服务的轻量客户端。
 
-只保留「网页检索」这一能力：直接调用 DuckDuckGo HTML 端点，返回标题、摘要
-与链接。原 query_rewriter / reranker / sufficiency 等 Agentic Search 管线已移除。
+本模块只负责把 SearXNG JSON API 转换成项目内部稳定的搜索结果。模型工具、
+超时降级和并发调度仍由 tools.py 与 ToolRegistry 负责。
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from html.parser import HTMLParser
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import urldefrag, urlparse
 
 import httpx
 
 
 def plain_text(value: str) -> str:
+    """压缩搜索摘要中的 HTML 标签和多余空白。"""
+
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value)).strip()
 
 
-@dataclass
 class SearchResult:
-    title: str
-    url: str
-    snippet: str
-    source_domain: str = ""
+    """项目内部使用的统一搜索结果。"""
+
+    def __init__(
+        self,
+        title: str,
+        url: str,
+        snippet: str,
+        source_domain: str,
+        engines: list[str] | None = None,
+        published_at: str | None = None,
+    ) -> None:
+        self.title = title
+        self.url = url
+        self.snippet = snippet
+        self.source_domain = source_domain
+        self.engines = engines or []
+        self.published_at = published_at
 
 
-class _DuckDuckGoParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.results: list[dict] = []
-        self._current: dict | None = None
-        self._capture: str | None = None
+class SearxngSearch:
+    """通过 HTTP 调用自托管 SearXNG，并规范化它返回的 JSON。"""
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = dict(attrs)
-        classes = set((attributes.get("class") or "").split())
-        if tag == "a" and "result__a" in classes:
-            self._current = {"title": "", "snippet": "", "url": self._clean_url(attributes.get("href", ""))}
-            self._capture = "title"
-        elif self._current is not None and "result__snippet" in classes:
-            self._capture = "snippet"
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float = 6.0,
+        language: str = "all",
+        transport=None,
+    ) -> None:
+        if not base_url.strip():
+            raise ValueError("SearXNG地址不能为空")
+        if timeout_seconds <= 0:
+            raise ValueError("SearXNG超时时间必须大于0")
 
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "a" and self._capture == "title":
-            self._capture = None
-        elif self._current is not None and self._capture == "snippet" and tag in {"a", "div"}:
-            self.results.append(self._current)
-            self._current = None
-            self._capture = None
-
-    def handle_data(self, data: str) -> None:
-        if self._current is not None and self._capture:
-            self._current[self._capture] += data.strip() + " "
-
-    @staticmethod
-    def _clean_url(url: str) -> str:
-        parsed = urlparse(url)
-        redirected = parse_qs(parsed.query).get("uddg")
-        return unquote(redirected[0]) if redirected else url
-
-
-class DuckDuckGoSearch:
-    endpoint = "https://html.duckduckgo.com/html/"
-
-    def __init__(self, timeout_seconds: float = 6) -> None:
+        self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.language = language or "all"
+        # transport 主要用于测试，也允许以后接入自定义代理或网络传输层。
+        self.transport = transport
 
     async def search(self, query: str, limit: int = 5) -> list[SearchResult]:
-        params = {"q": query}
-        async with httpx.AsyncClient(timeout=self.timeout_seconds, follow_redirects=True) as client:
+        """搜索单个Query，最多返回10条去重后的结果。"""
+
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError("搜索Query不能为空")
+
+        result_limit = max(1, min(limit, 10))
+        async with httpx.AsyncClient(
+            timeout=self.timeout_seconds,
+            transport=self.transport,
+        ) as client:
             response = await client.get(
-                self.endpoint, params=params, headers={"User-Agent": "Mozilla/5.0"}
+                f"{self.base_url}/search",
+                params={
+                    "q": normalized_query,
+                    "format": "json",
+                    "language": self.language,
+                    "safesearch": 0,
+                },
+                headers={"Accept": "application/json"},
             )
             response.raise_for_status()
-        parser = _DuckDuckGoParser()
-        parser.feed(response.text)
-        results = []
-        for item in parser.results[: max(1, min(limit, 10))]:
-            url = item["url"]
+
+        payload = response.json()
+        raw_results = payload.get("results")
+        if not isinstance(raw_results, list):
+            raise ValueError("SearXNG返回数据缺少results列表")
+
+        results: list[SearchResult] = []
+        seen_urls: set[str] = set()
+
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+
+            title = plain_text(str(item.get("title") or ""))
+            url = urldefrag(str(item.get("url") or "").strip()).url
+            if not title or not url.startswith(("http://", "https://")):
+                continue
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+
+            raw_engines = item.get("engines")
+            if isinstance(raw_engines, list):
+                engines = [str(engine) for engine in raw_engines if engine]
+            elif item.get("engine"):
+                engines = [str(item["engine"])]
+            else:
+                engines = []
+
+            published_at = item.get("publishedDate") or item.get("published_date")
             results.append(SearchResult(
-                title=plain_text(item["title"]),
-                snippet=plain_text(item["snippet"]),
+                title=title,
                 url=url,
+                snippet=plain_text(str(item.get("content") or "")),
                 source_domain=urlparse(url).netloc.lower(),
+                engines=engines,
+                published_at=str(published_at) if published_at else None,
             ))
+
+            if len(results) >= result_limit:
+                break
+
         return results

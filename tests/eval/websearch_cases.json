@@ -1,0 +1,38 @@
+[
+  {
+    "id": "game_news_zh",
+    "query": "最近一周重要游戏新闻",
+    "min_results": 3,
+    "min_domains": 2
+  },
+  {
+    "id": "game_official_update_zh",
+    "query": "热门游戏 最新版本 官方更新公告",
+    "min_results": 3,
+    "min_domains": 2
+  },
+  {
+    "id": "steam_release_en",
+    "query": "latest notable Steam game releases",
+    "min_results": 3,
+    "min_domains": 2
+  },
+  {
+    "id": "github_agent_harness",
+    "query": "GitHub open source agent harness Python",
+    "min_results": 3,
+    "min_domains": 2
+  },
+  {
+    "id": "python_official_docs",
+    "query": "Python asyncio official documentation",
+    "min_results": 3,
+    "min_domains": 2
+  },
+  {
+    "id": "mixed_language_game_query",
+    "query": "Roguelike 独立游戏 latest news",
+    "min_results": 3,
+    "min_domains": 2
+  }
+]
